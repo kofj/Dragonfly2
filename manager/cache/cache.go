@@ -17,33 +17,33 @@
 package cache
 
 import (
-	"fmt"
 	"time"
 
-	"d7y.io/dragonfly/v2/manager/config"
-	"d7y.io/dragonfly/v2/manager/database"
 	"github.com/go-redis/cache/v8"
+	"github.com/go-redis/redis/v8"
+
+	"d7y.io/dragonfly/v2/manager/config"
+	pkgredis "d7y.io/dragonfly/v2/pkg/redis"
 )
 
-const (
-	CDNNamespace        = "cdn"
-	SchedulerNamespace  = "scheduler"
-	SchedulersNamespace = "schedulers"
-)
-
+// Cache is cache client.
 type Cache struct {
 	*cache.Cache
 	TTL time.Duration
 }
 
-// New cache instance
+// New cache instance.
 func New(cfg *config.Config) (*Cache, error) {
 	var localCache *cache.TinyLFU
-	if cfg.Cache != nil {
-		localCache = cache.NewTinyLFU(cfg.Cache.Local.Size, cfg.Cache.Local.TTL)
-	}
+	localCache = cache.NewTinyLFU(cfg.Cache.Local.Size, cfg.Cache.Local.TTL)
 
-	rdb, err := database.NewRedis(cfg.Database.Redis)
+	rdb, err := pkgredis.NewRedis(&redis.UniversalOptions{
+		Addrs:      cfg.Database.Redis.Addrs,
+		MasterName: cfg.Database.Redis.MasterName,
+		DB:         cfg.Database.Redis.DB,
+		Username:   cfg.Database.Redis.Username,
+		Password:   cfg.Database.Redis.Password,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -57,20 +57,4 @@ func New(cfg *config.Config) (*Cache, error) {
 		}),
 		TTL: cfg.Cache.Redis.TTL,
 	}, nil
-}
-
-func MakeCacheKey(namespace string, id string) string {
-	return fmt.Sprintf("manager:%s:%s", namespace, id)
-}
-
-func MakeCDNCacheKey(hostname string, clusterID uint) string {
-	return MakeCacheKey(CDNNamespace, fmt.Sprintf("%s-%d", hostname, clusterID))
-}
-
-func MakeSchedulerCacheKey(hostname string, clusterID uint) string {
-	return MakeCacheKey(SchedulerNamespace, fmt.Sprintf("%s-%d", hostname, clusterID))
-}
-
-func MakeSchedulersCacheKey(hostname string) string {
-	return MakeCacheKey(SchedulersNamespace, hostname)
 }

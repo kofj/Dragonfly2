@@ -1,55 +1,96 @@
-dynconfig:
-  type: local
-  expireTime: 1000
-  cdnDirPath: tmp
+server:
+  advertiseIP: 127.0.0.1
+  advertisePort: 8004
+  listenIP: 0.0.0.0
+  port: 8002
+  host: foo
+  workHome: foo
+  cacheDir: foo
+  logDir: foo
+  pluginDir: foo
+  dataDir: foo
+
+database:
+  redis:
+    addrs: [ "foo", "bar" ]
+    masterName: "baz"
+    host: 127.0.0.1
+    port: 6379
+    password: foo
+    brokerDB: 1
+    backendDB: 2
+    networkTopologyDB: 3
 
 scheduler:
-  abtest: true
-  aevaluator: "a-evaluator"
-  bevaluator: "b-evaluator"
-  workerNum: 8
-  workerJobPoolSize: 10000
-  senderNum: 10
-  senderJobPoolSize: 10000
+  algorithm: default
+  backToSourceCount: 3
+  retryBackToSourceLimit: 2
+  retryLimit: 10
+  retryInterval: 10s
+  gc:
+    pieceDownloadTimeout: 5s
+    peerGCInterval: 10s
+    peerTTL: 60s
+    taskGCInterval: 30s
+    hostGCInterval: 1m
+    hostTTL: 1m
 
-server:
-  ip: "127.0.0.1"
-  host: "foo"
-  port: 8002
+dynConfig:
+  refreshInterval: 10s
 
-cdn:
-  servers:
-    - name: "cdn"
-      ip: "127.0.0.1"
-      rpcPort: 8003
-      downloadPort: 8001
-
-gc:
-  taskDelay: 3600000
-  peerTaskDelay: 3600000
+host:
+  idc: foo
+  location: baz
 
 manager:
   addr: 127.0.0.1:65003
   schedulerClusterID: 1
   keepAlive:
-    interval: 1000000000
+    interval: 5s
 
-host:
-  idc: foo
-  location: bar
+seedPeer:
+  enable: true
 
 job:
+  enable: true
   globalWorkerNum: 1
   schedulerWorkerNum: 1
   localWorkerNum: 5
-  redis:
-    host: "127.0.0.1"
-    port: 6379
-    password: "password"
-    brokerDB: 1
-    backendDB: 2
+
+storage:
+  maxSize: 1
+  maxBackups: 1
+  bufferSize: 1
 
 metrics:
+  enable: false
   addr: ":8000"
+  enableHost: true
 
-disableCDN: true
+security:
+  autoIssueCert: true
+  caCert: testdata/ca.crt
+  tlsVerify: true
+  tlsPolicy: force
+  certSpec:
+    dnsNames:
+      - foo
+    ipAddresses:
+      - 0.0.0.0
+    validityPeriod: 10m
+
+network:
+  enableIPv6: true
+
+networkTopology:
+  enable: true
+  collectInterval: 60s
+  probe:
+    queueLength: 5
+    count: 10
+
+trainer:
+  enable: false
+  addr: "127.0.0.1:9000"
+  interval: 10m
+  uploadTimeout: 2h

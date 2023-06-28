@@ -18,40 +18,44 @@ package dfget
 
 import (
 	"context"
-	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"d7y.io/dragonfly/v2/client/config"
-	"d7y.io/dragonfly/v2/internal/idgen"
-	"d7y.io/dragonfly/v2/pkg/source"
-	sourcemock "d7y.io/dragonfly/v2/pkg/source/mock"
-	"d7y.io/dragonfly/v2/pkg/util/digestutils"
 	"github.com/golang/mock/gomock"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"d7y.io/dragonfly/v2/client/config"
+	"d7y.io/dragonfly/v2/pkg/digest"
+	"d7y.io/dragonfly/v2/pkg/source"
+	"d7y.io/dragonfly/v2/pkg/source/mocks"
 )
 
 func Test_downloadFromSource(t *testing.T) {
 	homeDir, err := os.UserHomeDir()
 	assert.Nil(t, err)
-	output := filepath.Join(homeDir, idgen.UUIDString())
+	output := filepath.Join(homeDir, uuid.New().String())
 	defer os.Remove(output)
 
-	content := idgen.UUIDString()
-
-	sourceClient := sourcemock.NewMockResourceClient(gomock.NewController(t))
-	source.Register("http", sourceClient)
+	content := uuid.New().String()
+	sourceClient := mocks.NewMockResourceClient(gomock.NewController(t))
+	require.Nil(t, source.Register("http", sourceClient, func(request *source.Request) *source.Request {
+		return request
+	}))
 	defer source.UnRegister("http")
 
 	cfg := &config.DfgetConfig{
 		URL:    "http://a.b.c/xx",
 		Output: output,
-		Digest: strings.Join([]string{digestutils.Sha256Hash.String(), digestutils.Sha256(content)}, ":"),
+		Digest: strings.Join([]string{digest.AlgorithmSHA256, digest.SHA256FromStrings(content)}, ":"),
 	}
-
-	sourceClient.EXPECT().Download(context.Background(), cfg.URL, nil, nil).Return(ioutil.NopCloser(strings.NewReader(content)), nil)
+	request, err := source.NewRequest(cfg.URL)
+	assert.Nil(t, err)
+	sourceClient.EXPECT().Download(request).Return(source.NewResponse(io.NopCloser(strings.NewReader(content))), nil)
 
 	err = downloadFromSource(context.Background(), cfg, nil)
 	assert.Nil(t, err)

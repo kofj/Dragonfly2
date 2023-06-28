@@ -16,14 +16,21 @@
 
 package main
 
-import "d7y.io/dragonfly/v2/manager/model"
+import (
+	"context"
+
+	"go.uber.org/zap"
+
+	"d7y.io/dragonfly/v2/manager/models"
+)
 
 type searcher struct{}
 
-func (s *searcher) FindSchedulerCluster(schedulerClusters []model.SchedulerCluster, conditions map[string]string) (model.SchedulerCluster, bool) {
-	return model.SchedulerCluster{Name: "foo"}, true
+func (s *searcher) FindSchedulerClusters(ctx context.Context, schedulerClusters []models.SchedulerCluster, hostname, ip string,
+	conditions map[string]string, log *zap.SugaredLogger) ([]models.SchedulerCluster, error) {
+	return []models.SchedulerCluster{{Name: "foo"}}, nil
 }
 
-func DragonflyPluginInit(option map[string]string) (interface{}, map[string]string, error) {
+func DragonflyPluginInit(option map[string]string) (any, map[string]string, error) {
 	return &searcher{}, map[string]string{"type": "manager", "name": "searcher"}, nil
 }

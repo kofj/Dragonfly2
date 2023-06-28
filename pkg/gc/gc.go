@@ -14,57 +14,57 @@
  * limitations under the License.
  */
 
+//go:generate mockgen -destination gc_mock.go -source gc.go -package gc
+
 package gc
 
 import (
-	"errors"
+	"fmt"
 	"sync"
 	"time"
-
-	"github.com/sirupsen/logrus"
 )
 
-// GC is the interface used for release resource
+// GC is the interface used for release resource.
 type GC interface {
-	// Add adds GC task
+	// Add adds GC task.
 	Add(Task) error
 
-	// Run GC task
+	// Run GC task.
 	Run(string) error
 
-	// Run all registered GC tasks
+	// Run all registered GC tasks.
 	RunAll()
 
-	// Serve running the GC task
-	Serve()
+	// Start running the GC task.
+	Start()
 
-	// Stop running the GC task
+	// Stop running the GC task.
 	Stop()
 }
 
-// GC provides task release function
+// GC provides task release function.
 type gc struct {
 	tasks  *sync.Map
 	logger Logger
-	done   chan bool
+	done   chan struct{}
 }
 
-// Option is a functional option for configuring the GC
+// Option is a functional option for configuring the GC.
 type Option func(g *gc)
 
-// WithLogger set the logger for GC
+// WithLogger set the logger for GC.
 func WithLogger(logger Logger) Option {
 	return func(g *gc) {
 		g.logger = logger
 	}
 }
 
-// New returns a new GC instence
+// New returns a new GC instence.
 func New(options ...Option) GC {
 	g := &gc{
 		tasks:  &sync.Map{},
-		logger: logrus.New(),
-		done:   make(chan bool),
+		logger: &gcLogger{},
+		done:   make(chan struct{}),
 	}
 
 	for _, opt := range options {
@@ -86,7 +86,7 @@ func (g gc) Add(t Task) error {
 func (g gc) Run(id string) error {
 	v, ok := g.tasks.Load(id)
 	if !ok {
-		return errors.New("can not find the task")
+		return fmt.Errorf("can not find task %s", id)
 	}
 
 	go g.run(v.(Task))
@@ -97,8 +97,8 @@ func (g gc) RunAll() {
 	g.runAll()
 }
 
-func (g gc) Serve() {
-	g.tasks.Range(func(k interface{}, v interface{}) bool {
+func (g gc) Start() {
+	g.tasks.Range(func(k, v any) bool {
 		go func() {
 			task := v.(Task)
 			tick := time.NewTicker(task.Interval)
@@ -121,7 +121,7 @@ func (g gc) Stop() {
 }
 
 func (g gc) runAll() {
-	g.tasks.Range(func(k, v interface{}) bool {
+	g.tasks.Range(func(k, v any) bool {
 		go g.run(v.(Task))
 		return true
 	})

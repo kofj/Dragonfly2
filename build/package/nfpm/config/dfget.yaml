@@ -24,7 +24,7 @@ scheduler:
   # schedule timeout
   scheduleTimeout: 10s
 
-# when enable, pprof will be enabled,
+# when enabled, pprof will be enabled,
 verbose: true
 console: false
 
@@ -39,15 +39,13 @@ host:
   # geographical location and network topology
   location: ""
   idc: ""
-  securityDomain: ""
-  netTopology: ""
 
 # download service option
 download:
   # total download limit per second
-  totalRateLimit: 200Mi
+  totalRateLimit: 1024Mi
   # per peer task download limit per second
-  perPeerRateLimit: 20Mi
+  perPeerRateLimit: 512Mi
   # download grpc option
   downloadGRPC:
     # security option
@@ -79,7 +77,7 @@ download:
 # upload service option
 upload:
   # upload limit per second
-  rateLimit: 200Mi
+  rateLimit: 1024Mi
   security:
     insecure: true
     cacert: ""
@@ -103,13 +101,13 @@ storage:
   #                            fast than simple strategy, but:
   #                            the output file will be the peer data for uploading to other peers
   #                            when user delete or change this file, this peer data will be corrupted
-  strategy: io.d7y.storage.v2.advance
+  strategy: io.d7y.storage.v2.simple
   multiplex: true
 
 # proxy service option
 proxy:
   maxConcurrency: 12
-  defaultFilter: Expires&Signature
+  defaultFilter: Expires&Signature&ns
   security:
     insecure: true
     cacert: ""
@@ -117,7 +115,7 @@ proxy:
     key: ""
   tcpListen:
     # listen address
-    listen: 0.0.0.0
+    listen: 127.0.0.1
     # listen port, daemon will try to listen
     # when this port is not available, daemon will try next port
     port: 65001

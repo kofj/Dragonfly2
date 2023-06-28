@@ -21,7 +21,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -38,8 +37,8 @@ import (
 	"github.com/montanaflynn/stats"
 
 	"d7y.io/dragonfly/v2/client/config"
+	"d7y.io/dragonfly/v2/pkg/net/ip"
 	"d7y.io/dragonfly/v2/pkg/unit"
-	"d7y.io/dragonfly/v2/pkg/util/net/iputils"
 )
 
 var (
@@ -129,9 +128,11 @@ loop:
 }
 
 func debug() {
-	debugAddr := fmt.Sprintf("%s:%d", iputils.HostIP, 18066)
+	debugAddr := fmt.Sprintf("%s:%d", ip.IPv4.String(), 18066)
 	viewer.SetConfiguration(viewer.WithAddr(debugAddr))
-	statsview.New().Start()
+	if err := statsview.New().Start(); err != nil {
+		log.Println("stat view start failed", err)
+	}
 }
 
 func forceExit(signals chan os.Signal) {
@@ -164,7 +165,7 @@ func process(ctx context.Context, wg *sync.WaitGroup, result chan *Result) {
 			continue
 		}
 		var msg string
-		n, err := io.Copy(ioutil.Discard, resp.Body)
+		n, err := io.Copy(io.Discard, resp.Body)
 		if err != nil {
 			msg = err.Error()
 			log.Printf("discard data error: %s", err)
@@ -278,8 +279,10 @@ func saveToOutput(results []*Result) {
 		if v.PeerID == "" {
 			v.PeerID = "unknown"
 		}
-		out.WriteString(fmt.Sprintf("%s %s %d %v %d %d %s\n",
+		if _, err := out.WriteString(fmt.Sprintf("%s %s %d %v %d %d %s\n",
 			v.TaskID, v.PeerID, v.StatusCode, v.Cost,
-			v.StartTime.UnixNano()/100, v.EndTime.UnixNano()/100, v.Message))
+			v.StartTime.UnixNano()/100, v.EndTime.UnixNano()/100, v.Message)); err != nil {
+			log.Panicln("write string failed", err)
+		}
 	}
 }

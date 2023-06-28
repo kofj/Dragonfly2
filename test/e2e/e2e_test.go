@@ -17,31 +17,148 @@
 package e2e
 
 import (
+	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	. "github.com/onsi/ginkgo/v2" //nolint
+	. "github.com/onsi/gomega"    //nolint
+	"k8s.io/component-base/featuregate"
 
 	"d7y.io/dragonfly/v2/test/e2e/e2eutil"
-	. "github.com/onsi/ginkgo" //nolint
-	. "github.com/onsi/gomega" //nolint
-
 	_ "d7y.io/dragonfly/v2/test/e2e/manager"
 )
 
-const (
-	proxy              = "localhost:65001"
-	hostnameFilePath   = "/etc/hostname"
-	dragonflyNamespace = "dragonfly-system"
+var (
+	featureGates     = featuregate.NewFeatureGate()
+	featureGatesFlag string
+
+	featureGateRange     featuregate.Feature = "dfget-range"
+	featureGateOpenRange featuregate.Feature = "dfget-open-range"
+	featureGateCommit    featuregate.Feature = "dfget-commit"
+	featureGateNoLength  featuregate.Feature = "dfget-no-length"
+	featureGateEmptyFile featuregate.Feature = "dfget-empty-file"
+	featureGateRecursive featuregate.Feature = "dfget-recursive"
+
+	defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
+		featureGateCommit: {
+			Default:       true,
+			LockToDefault: false,
+			PreRelease:    featuregate.Alpha,
+		},
+		featureGateNoLength: {
+			Default:       true,
+			LockToDefault: false,
+			PreRelease:    featuregate.Alpha,
+		},
+		featureGateRange: {
+			Default:       false,
+			LockToDefault: false,
+			PreRelease:    featuregate.Alpha,
+		},
+		featureGateOpenRange: {
+			Default:       false,
+			LockToDefault: false,
+			PreRelease:    featuregate.Alpha,
+		},
+		featureGateEmptyFile: {
+			Default:       false,
+			LockToDefault: false,
+			PreRelease:    featuregate.Alpha,
+		},
+		featureGateRecursive: {
+			Default:       false,
+			LockToDefault: false,
+			PreRelease:    featuregate.Alpha,
+		},
+	}
 )
 
-const (
-	dfdaemonCompatibilityTestMode = "dfdaemon"
-)
+func init() {
+	_ = featureGates.Add(defaultFeatureGates)
+	flag.StringVar(&featureGatesFlag, "feature-gates", "", "e2e test feature gates")
+}
+
+var _ = AfterSuite(func() {
+	for _, server := range servers {
+		for i := 0; i < server.replicas; i++ {
+			out, err := e2eutil.KubeCtlCommand("-n", server.namespace, "get", "pod", "-l", fmt.Sprintf("component=%s", server.name),
+				"-o", fmt.Sprintf("jsonpath='{.items[%d].metadata.name}'", i)).CombinedOutput()
+			if err != nil {
+				fmt.Printf("get pod error: %s, output: %s\n", err, string(out))
+				continue
+			}
+			podName := strings.Trim(string(out), "'")
+			pod := e2eutil.NewPodExec(server.namespace, podName, server.name)
+
+			var (
+				retryCount    = 0
+				maxRetryCount = 10
+			)
+		retry:
+			countOut, err := e2eutil.KubeCtlCommand("-n", server.namespace, "get", "pod", "-l", fmt.Sprintf("component=%s", server.name),
+				"-o", fmt.Sprintf("jsonpath='{.items[%d].status.containerStatuses[0].restartCount}'", i)).CombinedOutput()
+			if err != nil {
+				fmt.Printf("get pod %s restart count error: %s, output: %s\n", podName, err, string(countOut))
+				continue
+			}
+			rawCount := strings.Trim(string(countOut), "'")
+			count, err := strconv.Atoi(rawCount)
+			if err != nil {
+				fmt.Printf("atoi error: %s\n", err)
+				continue
+			}
+			fmt.Printf("pod %s restart count: %d\n", podName, count)
+
+			out, err = pod.Command("sh", "-c", fmt.Sprintf(`
+              set -x
+              cp -r /var/log/dragonfly/%s /tmp/artifact/%s-%d
+              cp -r /var/log/dragonfly/dfget /tmp/artifact/%s-%d-dfget
+              find /tmp/artifact -type d -exec chmod 777 {} \;
+              `, server.logDirName, server.name, i, server.name, i)).CombinedOutput()
+			if err != nil {
+				fmt.Printf("copy log output: %q, error: %s, retry after 10s\n", string(out), err)
+				// pod maybe restart due to panic, wait it running again
+				time.Sleep(10 * time.Second)
+				if retryCount < maxRetryCount {
+					retryCount++
+					goto retry
+				}
+			}
+
+			if count > 0 {
+				if err := e2eutil.UploadArtifactPrevStdout(server.namespace, podName, fmt.Sprintf("%s-%d", server.name, i), server.name); err != nil {
+					fmt.Printf("upload pod %s artifact stdout file error: %v\n", podName, err)
+				}
+			}
+
+			if err := e2eutil.UploadArtifactStdout(server.namespace, podName, fmt.Sprintf("%s-%d", server.name, i), server.name); err != nil {
+				fmt.Printf("upload pod %s artifact prev stdout file error: %v\n", podName, err)
+			}
+
+			if server.pprofPort > 0 {
+				if out, err := e2eutil.UploadArtifactPProf(server.namespace, podName,
+					fmt.Sprintf("%s-%d", server.name, i), server.name, server.pprofPort); err != nil {
+					fmt.Printf("upload pod %s artifact pprof error: %v, output: %s\n", podName, err, out)
+				}
+			}
+
+		}
+	}
+})
 
 var _ = BeforeSuite(func() {
+	err := featureGates.Set(featureGatesFlag)
+	Expect(err).NotTo(HaveOccurred())
+	fmt.Printf("feature gates: %q, flags: %q\n", featureGates.String(), featureGatesFlag)
+
 	mode := os.Getenv("DRAGONFLY_COMPATIBILITY_E2E_TEST_MODE")
-	if mode != "" {
+	imageName := os.Getenv("DRAGONFLY_COMPATIBILITY_E2E_TEST_IMAGE")
+	if mode != "" && imageName != "" {
 		rawImages, err := e2eutil.KubeCtlCommand("-n", dragonflyNamespace, "get", "pod", "-l", fmt.Sprintf("component=%s", mode),
 			"-o", "jsonpath='{range .items[0]}{.spec.containers[0].image}{end}'").CombinedOutput()
 		image := strings.Trim(string(rawImages), "'")
@@ -49,7 +166,7 @@ var _ = BeforeSuite(func() {
 		fmt.Printf("special image name: %s\n", image)
 
 		stableImageTag := os.Getenv("DRAGONFLY_STABLE_IMAGE_TAG")
-		Expect(fmt.Sprintf("dragonflyoss/%s:%s", mode, stableImageTag)).To(Equal(image))
+		Expect(fmt.Sprintf("dragonflyoss/%s:%s", imageName, stableImageTag)).To(Equal(image))
 	}
 
 	rawGitCommit, err := e2eutil.GitCommand("rev-parse", "--short", "HEAD").CombinedOutput()
@@ -67,36 +184,34 @@ var _ = BeforeSuite(func() {
 	rawDfgetVersion, err := pod.Command("dfget", "version").CombinedOutput()
 	Expect(err).NotTo(HaveOccurred())
 	dfgetGitCommit := strings.Fields(string(rawDfgetVersion))[7]
+	fmt.Printf("raw dfget version:\n%s\n", rawDfgetVersion)
 	fmt.Printf("dfget merge commit: %s\n", dfgetGitCommit)
 
+	if !featureGates.Enabled(featureGateCommit) {
+		return
+	}
 	if mode == dfdaemonCompatibilityTestMode {
 		Expect(gitCommit).NotTo(Equal(dfgetGitCommit))
 		return
 	}
 
 	Expect(gitCommit).To(Equal(dfgetGitCommit))
-})
 
-var _ = AfterSuite(func() {
-	out, err := e2eutil.KubeCtlCommand("-n", dragonflyNamespace, "get", "pod", "-l", "component=dfdaemon",
-		"-o", "jsonpath='{range .items[*]}{.metadata.name}{end}'").CombinedOutput()
-	podName := strings.Trim(string(out), "'")
-	Expect(err).NotTo(HaveOccurred())
-	Expect(strings.HasPrefix(podName, "dragonfly-dfdaemon-")).Should(BeTrue())
+	if featureGates.Enabled(featureGateRange) {
+		out, err := e2eutil.DockerCopy("/bin/", "/tmp/sha256sum-offset").CombinedOutput()
+		if err != nil {
+			fmt.Println(string(out))
+		}
+		Expect(err).NotTo(HaveOccurred())
+	}
 
-	e2eutil.KubeCtlCopyCommand(dragonflyNamespace, podName, "/var/log/dragonfly/daemon/core.log", "/tmp/artifact/daemon.log").CombinedOutput()
-	e2eutil.KubeCtlCopyCommand(dragonflyNamespace, "dragonlfy-manager-0", "/var/log/dragonfly/manager/core.log", "/tmp/artifact/manager-0.log").CombinedOutput()
-	e2eutil.KubeCtlCopyCommand(dragonflyNamespace, "dragonlfy-manager-0", "/var/log/dragonfly/manager/gin.log", "/tmp/artifact/manager-gin-0.log").CombinedOutput()
-	e2eutil.KubeCtlCopyCommand(dragonflyNamespace, "dragonlfy-manager-1", "/var/log/dragonfly/manager/core.log", "/tmp/artifact/manager-1.log").CombinedOutput()
-	e2eutil.KubeCtlCopyCommand(dragonflyNamespace, "dragonlfy-manager-1", "/var/log/dragonfly/manager/gin.log", "/tmp/artifact/manager-gin-1.log").CombinedOutput()
-	e2eutil.KubeCtlCopyCommand(dragonflyNamespace, "dragonlfy-manager-2", "/var/log/dragonfly/manager/core.log", "/tmp/artifact/manager-2.log").CombinedOutput()
-	e2eutil.KubeCtlCopyCommand(dragonflyNamespace, "dragonlfy-manager-2", "/var/log/dragonfly/manager/gin.log", "/tmp/artifact/manager-gin-2.log").CombinedOutput()
-	e2eutil.KubeCtlCopyCommand(dragonflyNamespace, "dragonfly-cdn-0", "/var/log/dragonfly/cdn/core.log", "/tmp/artifact/cdn-0.log").CombinedOutput()
-	e2eutil.KubeCtlCopyCommand(dragonflyNamespace, "dragonfly-cdn-1", "/var/log/dragonfly/cdn/core.log", "/tmp/artifact/cdn-1.log").CombinedOutput()
-	e2eutil.KubeCtlCopyCommand(dragonflyNamespace, "dragonfly-cdn-2", "/var/log/dragonfly/cdn/core.log", "/tmp/artifact/cdn-2.log").CombinedOutput()
-	e2eutil.KubeCtlCopyCommand(dragonflyNamespace, "dragonfly-scheduler-0", "/var/log/dragonfly/scheduler/core.log", "/tmp/artifact/scheduler-0.log").CombinedOutput()
-	e2eutil.KubeCtlCopyCommand(dragonflyNamespace, "dragonfly-scheduler-1", "/var/log/dragonfly/scheduler/core.log", "/tmp/artifact/scheduler-1.log").CombinedOutput()
-	e2eutil.KubeCtlCopyCommand(dragonflyNamespace, "dragonfly-scheduler-2", "/var/log/dragonfly/scheduler/core.log", "/tmp/artifact/scheduler-2.log").CombinedOutput()
+	if featureGates.Enabled(featureGateRecursive) {
+		out, err := e2eutil.DockerCopy("/bin/", "/tmp/download-grpc-test").CombinedOutput()
+		if err != nil {
+			fmt.Println(string(out))
+		}
+		Expect(err).NotTo(HaveOccurred())
+	}
 })
 
 // TestE2E is the root of e2e test function

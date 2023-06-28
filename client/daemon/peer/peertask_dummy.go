@@ -21,42 +21,77 @@ import (
 
 	"google.golang.org/grpc"
 
-	"d7y.io/dragonfly/v2/internal/dfcodes"
+	commonv1 "d7y.io/api/pkg/apis/common/v1"
+	schedulerv1 "d7y.io/api/pkg/apis/scheduler/v1"
+
 	"d7y.io/dragonfly/v2/internal/dferrors"
-	"d7y.io/dragonfly/v2/pkg/rpc/scheduler"
-	schedulerclient "d7y.io/dragonfly/v2/pkg/rpc/scheduler/client"
+	"d7y.io/dragonfly/v2/pkg/dfnet"
 )
 
+// when scheduler is not available, use dummySchedulerClient to back source
 type dummySchedulerClient struct {
 }
 
-func (d *dummySchedulerClient) RegisterPeerTask(ctx context.Context, request *scheduler.PeerTaskRequest, option ...grpc.CallOption) (*scheduler.RegisterResult, error) {
+func (d *dummySchedulerClient) RegisterPeerTask(ctx context.Context, request *schedulerv1.PeerTaskRequest, option ...grpc.CallOption) (*schedulerv1.RegisterResult, error) {
 	panic("should not call this function")
 }
 
-func (d *dummySchedulerClient) ReportPieceResult(ctx context.Context, s string, request *scheduler.PeerTaskRequest, option ...grpc.CallOption) (schedulerclient.PeerPacketStream, error) {
+func (d *dummySchedulerClient) ReportPieceResult(ctx context.Context, request *schedulerv1.PeerTaskRequest, option ...grpc.CallOption) (schedulerv1.Scheduler_ReportPieceResultClient, error) {
 	return &dummyPeerPacketStream{}, nil
 }
 
-func (d *dummySchedulerClient) ReportPeerResult(ctx context.Context, result *scheduler.PeerResult, option ...grpc.CallOption) error {
+func (d *dummySchedulerClient) ReportPeerResult(ctx context.Context, result *schedulerv1.PeerResult, option ...grpc.CallOption) error {
 	return nil
 }
 
-func (d *dummySchedulerClient) LeaveTask(ctx context.Context, target *scheduler.PeerTarget, option ...grpc.CallOption) error {
+func (d *dummySchedulerClient) LeaveTask(ctx context.Context, target *schedulerv1.PeerTarget, option ...grpc.CallOption) error {
 	return nil
+}
+
+func (d *dummySchedulerClient) AnnounceHost(context.Context, *schedulerv1.AnnounceHostRequest, ...grpc.CallOption) error {
+	return nil
+}
+
+func (d *dummySchedulerClient) LeaveHost(ctx context.Context, target *schedulerv1.LeaveHostRequest, option ...grpc.CallOption) error {
+	return nil
+}
+
+func (d *dummySchedulerClient) StatTask(ctx context.Context, request *schedulerv1.StatTaskRequest, option ...grpc.CallOption) (*schedulerv1.Task, error) {
+	panic("should not call this function")
+}
+
+func (d *dummySchedulerClient) AnnounceTask(ctx context.Context, request *schedulerv1.AnnounceTaskRequest, option ...grpc.CallOption) error {
+	panic("should not call this function")
+}
+
+func (d *dummySchedulerClient) SyncProbes(ctx context.Context, req *schedulerv1.SyncProbesRequest, opts ...grpc.CallOption) (schedulerv1.Scheduler_SyncProbesClient, error) {
+	panic("should not call this function")
 }
 
 func (d *dummySchedulerClient) Close() error {
 	return nil
 }
 
+func (d *dummySchedulerClient) UpdateState(addrs []dfnet.NetAddr) {
+}
+
+func (d *dummySchedulerClient) GetState() []dfnet.NetAddr {
+	return nil
+}
+
 type dummyPeerPacketStream struct {
+	grpc.ClientStream
 }
 
-func (d *dummyPeerPacketStream) Recv() (pp *scheduler.PeerPacket, err error) {
-	return nil, dferrors.New(dfcodes.SchedNeedBackSource, "")
+func (d *dummyPeerPacketStream) Recv() (*schedulerv1.PeerPacket, error) {
+	// TODO set commonv1.Code_SchedNeedBackSource in *scheduler.PeerPacket instead of error
+	return nil, dferrors.New(commonv1.Code_SchedNeedBackSource, "")
 }
 
-func (d *dummyPeerPacketStream) Send(pr *scheduler.PieceResult) (err error) {
+func (d *dummyPeerPacketStream) Send(pr *schedulerv1.PieceResult) error {
+	return nil
+}
+
+func (d *dummyPeerPacketStream) CloseSend() error {
 	return nil
 }

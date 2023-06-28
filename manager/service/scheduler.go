@@ -17,51 +17,56 @@
 package service
 
 import (
-	"d7y.io/dragonfly/v2/manager/model"
+	"context"
+
+	"d7y.io/dragonfly/v2/manager/models"
 	"d7y.io/dragonfly/v2/manager/types"
 )
 
-func (s *rest) CreateScheduler(json types.CreateSchedulerRequest) (*model.Scheduler, error) {
-	scheduler := model.Scheduler{
-		HostName:           json.HostName,
-		VIPs:               json.VIPs,
+func (s *service) CreateScheduler(ctx context.Context, json types.CreateSchedulerRequest) (*models.Scheduler, error) {
+	features := types.DefaultSchedulerFeatures
+	if json.Features != nil {
+		features = json.Features
+	}
+
+	scheduler := models.Scheduler{
+		Hostname:           json.Hostname,
 		IDC:                json.IDC,
 		Location:           json.Location,
-		NetConfig:          json.NetConfig,
 		IP:                 json.IP,
 		Port:               json.Port,
+		Features:           features,
 		SchedulerClusterID: json.SchedulerClusterID,
 	}
 
-	if err := s.db.Create(&scheduler).Error; err != nil {
+	if err := s.db.WithContext(ctx).Create(&scheduler).Error; err != nil {
 		return nil, err
 	}
 
 	return &scheduler, nil
 }
 
-func (s *rest) DestroyScheduler(id uint) error {
-	scheduler := model.Scheduler{}
-	if err := s.db.First(&scheduler, id).Error; err != nil {
+func (s *service) DestroyScheduler(ctx context.Context, id uint) error {
+	scheduler := models.Scheduler{}
+	if err := s.db.WithContext(ctx).First(&scheduler, id).Error; err != nil {
 		return err
 	}
 
-	if err := s.db.Unscoped().Delete(&model.Scheduler{}, id).Error; err != nil {
+	if err := s.db.WithContext(ctx).Unscoped().Delete(&models.Scheduler{}, id).Error; err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (s *rest) UpdateScheduler(id uint, json types.UpdateSchedulerRequest) (*model.Scheduler, error) {
-	scheduler := model.Scheduler{}
-	if err := s.db.First(&scheduler, id).Updates(model.Scheduler{
-		VIPs:               json.VIPs,
+func (s *service) UpdateScheduler(ctx context.Context, id uint, json types.UpdateSchedulerRequest) (*models.Scheduler, error) {
+	scheduler := models.Scheduler{}
+	if err := s.db.WithContext(ctx).First(&scheduler, id).Updates(models.Scheduler{
 		IDC:                json.IDC,
 		Location:           json.Location,
-		NetConfig:          json.NetConfig,
 		IP:                 json.IP,
 		Port:               json.Port,
+		Features:           json.Features,
 		SchedulerClusterID: json.SchedulerClusterID,
 	}).Error; err != nil {
 		return nil, err
@@ -70,43 +75,28 @@ func (s *rest) UpdateScheduler(id uint, json types.UpdateSchedulerRequest) (*mod
 	return &scheduler, nil
 }
 
-func (s *rest) GetScheduler(id uint) (*model.Scheduler, error) {
-	scheduler := model.Scheduler{}
-	if err := s.db.First(&scheduler, id).Error; err != nil {
+func (s *service) GetScheduler(ctx context.Context, id uint) (*models.Scheduler, error) {
+	scheduler := models.Scheduler{}
+	if err := s.db.WithContext(ctx).First(&scheduler, id).Error; err != nil {
 		return nil, err
 	}
 
 	return &scheduler, nil
 }
 
-func (s *rest) GetSchedulers(q types.GetSchedulersQuery) (*[]model.Scheduler, error) {
-	schedulers := []model.Scheduler{}
-	if err := s.db.Scopes(model.Paginate(q.Page, q.PerPage)).Where(&model.Scheduler{
-		HostName:           q.HostName,
-		IDC:                q.IDC,
-		Location:           q.Location,
-		IP:                 q.IP,
-		Status:             q.Status,
-		SchedulerClusterID: q.SchedulerClusterID,
-	}).Find(&schedulers).Error; err != nil {
-		return nil, err
-	}
-
-	return &schedulers, nil
-}
-
-func (s *rest) SchedulerTotalCount(q types.GetSchedulersQuery) (int64, error) {
+func (s *service) GetSchedulers(ctx context.Context, q types.GetSchedulersQuery) ([]models.Scheduler, int64, error) {
 	var count int64
-	if err := s.db.Model(&model.Scheduler{}).Where(&model.Scheduler{
-		HostName:           q.HostName,
+	var schedulers []models.Scheduler
+	if err := s.db.WithContext(ctx).Scopes(models.Paginate(q.Page, q.PerPage)).Where(&models.Scheduler{
+		Hostname:           q.Hostname,
 		IDC:                q.IDC,
 		Location:           q.Location,
 		IP:                 q.IP,
-		Status:             q.Status,
+		State:              q.State,
 		SchedulerClusterID: q.SchedulerClusterID,
-	}).Count(&count).Error; err != nil {
-		return 0, err
+	}).Find(&schedulers).Limit(-1).Offset(-1).Count(&count).Error; err != nil {
+		return nil, 0, err
 	}
 
-	return count, nil
+	return schedulers, count, nil
 }

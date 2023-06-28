@@ -14,110 +14,238 @@
  * limitations under the License.
  */
 
+//go:generate mockgen -destination mocks/searcher_mock.go -source searcher.go -package mocks
+
 package searcher
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
 	"sort"
+	"strings"
 
-	"d7y.io/dragonfly/v2/manager/model"
 	"github.com/mitchellh/mapstructure"
-	"gonum.org/v1/gonum/stat"
+	"github.com/yl2chen/cidranger"
+	"go.uber.org/zap"
+
+	logger "d7y.io/dragonfly/v2/internal/dflog"
+	"d7y.io/dragonfly/v2/manager/models"
+	"d7y.io/dragonfly/v2/pkg/math"
+	"d7y.io/dragonfly/v2/pkg/types"
 )
 
 const (
-	conditionSecurityDomain = "security_domain"
-	conditionLocation       = "location"
-	conditionIDC            = "idc"
+	// Condition IDC key.
+	ConditionIDC = "idc"
+
+	// Condition location key.
+	ConditionLocation = "location"
 )
 
 const (
-	conditionLocationWeight = 0.7
-	conditionIDCWeight      = 0.3
+	// cidrAffinityWeight is CIDR affinity weight.
+	cidrAffinityWeight float64 = 0.4
+
+	// idcAffinityWeight is IDC affinity weight.
+	idcAffinityWeight float64 = 0.35
+
+	// locationAffinityWeight is location affinity weight.
+	locationAffinityWeight = 0.24
+
+	// clusterTypeWeight is cluster type weight.
+	clusterTypeWeight float64 = 0.01
 )
 
+const (
+	// Maximum score.
+	maxScore float64 = 1.0
+
+	// Minimum score.
+	minScore = 0
+)
+
+const (
+	// Maximum number of elements.
+	maxElementLen = 5
+)
+
+// Scheduler cluster scopes.
 type Scopes struct {
-	Location []string `mapstructure:"location"`
-	IDC      []string `mapstructure:"idc"`
+	IDC      string   `mapstructure:"idc"`
+	Location string   `mapstructure:"location"`
+	CIDRs    []string `mapstructure:"cidrs"`
 }
 
 type Searcher interface {
-	FindSchedulerCluster([]model.SchedulerCluster, map[string]string) (model.SchedulerCluster, bool)
+	// FindSchedulerClusters finds scheduler clusters that best matches the evaluation.
+	FindSchedulerClusters(ctx context.Context, schedulerClusters []models.SchedulerCluster, ip, hostname string,
+		conditions map[string]string, log *zap.SugaredLogger) ([]models.SchedulerCluster, error)
 }
 
 type searcher struct{}
 
-func New() Searcher {
-	s, err := LoadPlugin()
+func New(pluginDir string) Searcher {
+	s, err := LoadPlugin(pluginDir)
 	if err != nil {
+		logger.Info("use default searcher")
 		return &searcher{}
 	}
 
+	logger.Info("use searcher plugin")
 	return s
 }
 
-func (s *searcher) FindSchedulerCluster(schedulerClusters []model.SchedulerCluster, conditions map[string]string) (model.SchedulerCluster, bool) {
-	if len(schedulerClusters) <= 0 || len(conditions) <= 0 {
-		return model.SchedulerCluster{}, false
+// FindSchedulerClusters finds scheduler clusters that best matches the evaluation.
+func (s *searcher) FindSchedulerClusters(ctx context.Context, schedulerClusters []models.SchedulerCluster, ip, hostname string,
+	conditions map[string]string, log *zap.SugaredLogger) ([]models.SchedulerCluster, error) {
+	log = log.With("ip", ip, "hostname", hostname, "conditions", conditions)
+
+	if len(schedulerClusters) <= 0 {
+		return nil, errors.New("empty scheduler clusters")
 	}
 
-	// If there are security domain conditions, match clusters of the same security domain.
-	// If the security domain condition does not exist, it matches clusters that does not have a security domain.
-	// Then use clusters sets to score according to scopes.
-	securityDomain := conditions[conditionSecurityDomain]
-	var clusters []model.SchedulerCluster
-	for _, v := range schedulerClusters {
-		if v.SecurityGroup.Domain == securityDomain {
-			clusters = append(clusters, v)
-		}
+	clusters := FilterSchedulerClusters(conditions, schedulerClusters)
+	if len(clusters) == 0 {
+		return nil, fmt.Errorf("conditions %#v does not match any scheduler cluster", conditions)
 	}
 
-	switch len(clusters) {
-	case 0:
-		return model.SchedulerCluster{}, false
-	case 1:
-		return clusters[0], true
-	default:
-		var maxMean float64 = 0
-		cluster := clusters[0]
-		for _, v := range clusters {
-			mean := calculateSchedulerClusterMean(conditions, v.Scopes)
-			if mean > maxMean {
-				maxMean = mean
-				cluster = v
+	sort.Slice(
+		clusters,
+		func(i, j int) bool {
+			var si, sj Scopes
+			if err := mapstructure.Decode(clusters[i].Scopes, &si); err != nil {
+				log.Errorf("cluster %s decode scopes failed: %v", clusters[i].Name, err)
+				return false
 			}
+
+			if err := mapstructure.Decode(clusters[j].Scopes, &sj); err != nil {
+				log.Errorf("cluster %s decode scopes failed: %v", clusters[i].Name, err)
+				return false
+			}
+
+			return Evaluate(ip, hostname, conditions, si, clusters[i], log) > Evaluate(ip, hostname, conditions, sj, clusters[j], log)
+		},
+	)
+
+	return clusters, nil
+}
+
+// Filter the scheduler clusters that dfdaemon can be used.
+func FilterSchedulerClusters(conditions map[string]string, schedulerClusters []models.SchedulerCluster) []models.SchedulerCluster {
+	var clusters []models.SchedulerCluster
+	for _, schedulerCluster := range schedulerClusters {
+		// There are no active schedulers in the scheduler cluster
+		if len(schedulerCluster.Schedulers) == 0 {
+			continue
 		}
-		return cluster, true
+
+		clusters = append(clusters, schedulerCluster)
 	}
+
+	return clusters
 }
 
-func calculateSchedulerClusterMean(conditions map[string]string, rawScopes map[string]interface{}) float64 {
-	var scopes Scopes
-	if err := mapstructure.Decode(rawScopes, &scopes); err != nil {
-		return 0
-	}
-
-	location := conditions[conditionLocation]
-	lx := calculateConditionScore(location, scopes.Location)
-
-	idc := conditions[conditionIDC]
-	ix := calculateConditionScore(idc, scopes.IDC)
-
-	return stat.Mean([]float64{lx, ix}, []float64{conditionLocationWeight, conditionIDCWeight})
+// Evaluate the degree of matching between scheduler cluster and dfdaemon.
+func Evaluate(ip, hostname string, conditions map[string]string, scopes Scopes, cluster models.SchedulerCluster, log *zap.SugaredLogger) float64 {
+	return cidrAffinityWeight*calculateCIDRAffinityScore(ip, scopes.CIDRs, log) +
+		idcAffinityWeight*calculateIDCAffinityScore(conditions[ConditionIDC], scopes.IDC) +
+		locationAffinityWeight*calculateMultiElementAffinityScore(conditions[ConditionLocation], scopes.Location) +
+		clusterTypeWeight*calculateClusterTypeScore(cluster)
 }
 
-func calculateConditionScore(value string, scope []string) float64 {
-	if value == "" {
-		return 0
+// calculateCIDRAffinityScore 0.0~1.0 larger and better.
+func calculateCIDRAffinityScore(ip string, cidrs []string, log *zap.SugaredLogger) float64 {
+	// Construct CIDR ranger.
+	ranger := cidranger.NewPCTrieRanger()
+	for _, cidr := range cidrs {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			log.Error(err)
+			continue
+		}
+
+		if err := ranger.Insert(cidranger.NewBasicRangerEntry(*network)); err != nil {
+			log.Error(err)
+			continue
+		}
 	}
 
-	if len(scope) <= 0 {
-		return 0
+	// Determine whether an IP is contained in the constructed networks ranger.
+	contains, err := ranger.Contains(net.ParseIP(ip))
+	if err != nil {
+		log.Error(err)
+		return minScore
 	}
 
-	i := sort.SearchStrings(scope, value)
-	if i < 0 {
-		return 0
+	if !contains {
+		return minScore
 	}
 
-	return 1
+	return maxScore
+}
+
+// calculateIDCAffinityScore 0.0~1.0 larger and better.
+func calculateIDCAffinityScore(dst, src string) float64 {
+	if dst == "" || src == "" {
+		return minScore
+	}
+
+	if dst == src {
+		return maxScore
+	}
+
+	// Dst has only one element, src has multiple elements separated by "|".
+	// When dst element matches one of the multiple elements of src,
+	// it gets the max score of idc.
+	srcElements := strings.Split(src, types.AffinitySeparator)
+	for _, srcElement := range srcElements {
+		if dst == srcElement {
+			return maxScore
+		}
+	}
+
+	return minScore
+}
+
+// calculateMultiElementAffinityScore 0.0~1.0 larger and better.
+func calculateMultiElementAffinityScore(dst, src string) float64 {
+	if dst == "" || src == "" {
+		return minScore
+	}
+
+	if dst == src {
+		return maxScore
+	}
+
+	// Calculate the number of multi-element matches divided by "|".
+	var score, elementLen int
+	dstElements := strings.Split(dst, types.AffinitySeparator)
+	srcElements := strings.Split(src, types.AffinitySeparator)
+	elementLen = math.Min(len(dstElements), len(srcElements))
+
+	// Maximum element length is 5.
+	if elementLen > maxElementLen {
+		elementLen = maxElementLen
+	}
+
+	for i := 0; i < elementLen; i++ {
+		if dstElements[i] != srcElements[i] {
+			break
+		}
+
+		score++
+	}
+
+	return float64(score) / float64(maxElementLen)
+}
+
+// calculateClusterTypeScore 0.0~1.0 larger and better.
+func calculateClusterTypeScore(cluster models.SchedulerCluster) float64 {
+	if cluster.IsDefault {
+		return maxScore
+	}
+
+	return minScore
 }

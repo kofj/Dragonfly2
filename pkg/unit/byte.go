@@ -18,14 +18,14 @@ package unit
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
-	"strings"
 
-	"d7y.io/dragonfly/v2/pkg/util/stringutils"
-	"github.com/pkg/errors"
 	"gopkg.in/yaml.v3"
+
+	pkgstrings "d7y.io/dragonfly/v2/pkg/strings"
 )
 
 type Bytes int64
@@ -50,7 +50,7 @@ func ToBytes(size int64) Bytes {
 
 // Set is used for command flag var
 func (f *Bytes) Set(s string) (err error) {
-	if stringutils.IsBlank(s) {
+	if pkgstrings.IsBlank(s) {
 		*f = 0
 	} else {
 		*f, err = parseSize(s)
@@ -95,14 +95,13 @@ func (f Bytes) String() string {
 var sizeRegexp = regexp.MustCompile(`^([0-9]+)(\.0*)?([MmKkGgTtPpEe])?[iI]?[bB]?$`)
 
 func parseSize(fsize string) (Bytes, error) {
-	fsize = strings.TrimSpace(fsize)
-	if stringutils.IsBlank(fsize) {
+	if pkgstrings.IsBlank(fsize) {
 		return 0, nil
 	}
 
 	matches := sizeRegexp.FindStringSubmatch(fsize)
 	if len(matches) == 0 {
-		return 0, errors.Errorf("parse size %s: invalid format", fsize)
+		return 0, fmt.Errorf("parse size %s: invalid format", fsize)
 	}
 
 	var unit Bytes
@@ -125,13 +124,13 @@ func parseSize(fsize string) (Bytes, error) {
 
 	num, err := strconv.ParseInt(matches[1], 0, 64)
 	if err != nil {
-		return 0, errors.Wrapf(err, "failed to parse size: %s", fsize)
+		return 0, fmt.Errorf("failed to parse size %s: %w", fsize, err)
 	}
 
 	return ToBytes(num) * unit, nil
 }
 
-func (f Bytes) MarshalYAML() (interface{}, error) {
+func (f Bytes) MarshalYAML() (any, error) {
 	result := f.String()
 	return result, nil
 }
@@ -144,8 +143,8 @@ func (f *Bytes) UnmarshalYAML(node *yaml.Node) error {
 	return f.unmarshal(yaml.Unmarshal, []byte(node.Value))
 }
 
-func (f *Bytes) unmarshal(unmarshal func(in []byte, out interface{}) (err error), b []byte) error {
-	var v interface{}
+func (f *Bytes) unmarshal(unmarshal func(in []byte, out any) (err error), b []byte) error {
+	var v any
 	if err := unmarshal(b, &v); err != nil {
 		return err
 	}
@@ -162,7 +161,7 @@ func (f *Bytes) unmarshal(unmarshal func(in []byte, out interface{}) (err error)
 	case string:
 		size, err := parseSize(value)
 		if err != nil {
-			return errors.WithMessage(err, "invalid byte size")
+			return fmt.Errorf("invalid byte size: %w", err)
 		}
 		*f = size
 		return nil

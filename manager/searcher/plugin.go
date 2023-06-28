@@ -26,8 +26,8 @@ const (
 	pluginName = "searcher"
 )
 
-func LoadPlugin() (Searcher, error) {
-	client, _, err := dfplugin.Load(dfplugin.PluginTypeManager, pluginName, map[string]string{})
+func LoadPlugin(dir string) (Searcher, error) {
+	client, _, err := dfplugin.Load(dir, dfplugin.PluginTypeManager, pluginName, map[string]string{})
 	if err != nil {
 		return nil, err
 	}
@@ -35,5 +35,5 @@ func LoadPlugin() (Searcher, error) {
 	if rc, ok := client.(Searcher); ok {
 		return rc, err
 	}
-	return nil, errors.New("invalid client, not a ResourceClient")
+	return nil, errors.New("invalid searcher plugin")
 }

@@ -26,29 +26,43 @@ type AddSchedulerToSchedulerClusterParams struct {
 }
 
 type CreateSchedulerClusterRequest struct {
-	Name                string                 `json:"name" binding:"required"`
-	BIO                 string                 `json:"bio" binding:"omitempty"`
-	Config              map[string]interface{} `json:"config" binding:"required"`
-	ClientConfig        map[string]interface{} `json:"client_config" binding:"required"`
-	Scopes              map[string]interface{} `json:"scopes" binding:"omitempty"`
-	IsDefault           bool                   `json:"is_default" binding:"omitempty"`
-	CDNClusterID        uint                   `json:"cdn_cluster_id" binding:"omitempty"`
-	SecurityGroupDomain string                 `json:"security_group_domain" binding:"omitempty"`
+	Name              string                        `json:"name" binding:"required"`
+	BIO               string                        `json:"bio" binding:"omitempty"`
+	Config            *SchedulerClusterConfig       `json:"config" binding:"required"`
+	ClientConfig      *SchedulerClusterClientConfig `json:"client_config" binding:"required"`
+	Scopes            *SchedulerClusterScopes       `json:"scopes" binding:"omitempty"`
+	IsDefault         bool                          `json:"is_default" binding:"omitempty"`
+	SeedPeerClusterID uint                          `json:"seed_peer_cluster_id" binding:"omitempty"`
 }
 
 type UpdateSchedulerClusterRequest struct {
-	Name                string                 `json:"name" binding:"omitempty"`
-	BIO                 string                 `json:"bio" binding:"omitempty"`
-	Config              map[string]interface{} `json:"config" binding:"omitempty"`
-	ClientConfig        map[string]interface{} `json:"client_config" binding:"omitempty"`
-	Scopes              map[string]interface{} `json:"scopes" binding:"omitempty"`
-	IsDefault           bool                   `json:"is_default" binding:"omitempty"`
-	CDNClusterID        uint                   `json:"cdn_cluster_id" binding:"omitempty"`
-	SecurityGroupDomain string                 `json:"security_group_domain" binding:"omitempty"`
+	Name              string                        `json:"name" binding:"omitempty"`
+	BIO               string                        `json:"bio" binding:"omitempty"`
+	Config            *SchedulerClusterConfig       `json:"config" binding:"omitempty"`
+	ClientConfig      *SchedulerClusterClientConfig `json:"client_config" binding:"omitempty"`
+	Scopes            *SchedulerClusterScopes       `json:"scopes" binding:"omitempty"`
+	IsDefault         bool                          `json:"is_default" binding:"omitempty"`
+	SeedPeerClusterID uint                          `json:"seed_peer_cluster_id" binding:"omitempty"`
 }
 
 type GetSchedulerClustersQuery struct {
 	Name    string `form:"name" binding:"omitempty"`
 	Page    int    `form:"page" binding:"omitempty,gte=1"`
 	PerPage int    `form:"per_page" binding:"omitempty,gte=1,lte=50"`
+}
+
+type SchedulerClusterConfig struct {
+	CandidateParentLimit uint32 `yaml:"candidateParentLimit" mapstructure:"candidateParentLimit" json:"candidate_parent_limit" binding:"omitempty,gte=1,lte=20"`
+	FilterParentLimit    uint32 `yaml:"filterParentLimit" mapstructure:"filterParentLimit" json:"filter_parent_limit" binding:"omitempty,gte=10,lte=1000"`
+}
+
+type SchedulerClusterClientConfig struct {
+	LoadLimit            uint32 `yaml:"loadLimit" mapstructure:"loadLimit" json:"load_limit" binding:"omitempty,gte=1,lte=2000"`
+	ConcurrentPieceCount uint32 `yaml:"concurrentPieceCount" mapstructure:"concurrentPieceCount" json:"concurrent_piece_count" binding:"omitempty,gte=1,lte=50"`
+}
+
+type SchedulerClusterScopes struct {
+	IDC      string   `yaml:"idc" mapstructure:"idc" json:"idc" binding:"omitempty"`
+	Location string   `yaml:"location" mapstructure:"location" json:"location" binding:"omitempty"`
+	CIDRs    []string `yaml:"cidrs" mapstructure:"cidrs" json:"cidrs" binding:"omitempty"`
 }

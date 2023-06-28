@@ -18,9 +18,9 @@ package dependency
 
 import (
 	"fmt"
+	"io/fs"
+	"os"
 
-	"d7y.io/dragonfly/v2/pkg/util/fileutils"
-	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/cobra/doc"
 )
@@ -59,9 +59,14 @@ func (g *genDocCommand) bindFlags() {
 }
 
 func (g *genDocCommand) runDoc() error {
-	_ = fileutils.MkdirAll(g.path)
-	if !fileutils.IsDir(g.path) {
-		return errors.Errorf("path %s is not dir, please check it", g.path)
+	_ = os.MkdirAll(g.path, fs.FileMode(0755))
+	file, err := os.Stat(g.path)
+	if err != nil {
+		return err
+	}
+
+	if !file.IsDir() {
+		return fmt.Errorf("path %s is not dir, please check it", g.path)
 	}
 
 	return doc.GenMarkdownTree(g.cmd.Parent(), g.path)

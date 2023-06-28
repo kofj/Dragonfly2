@@ -15,9 +15,6 @@ docker-push() {
 
 main() {
     case "${1-}" in
-    cdn)
-        docker-push cdn
-        ;;
     dfdaemon)
         docker-push dfdaemon
         ;;
@@ -26,6 +23,9 @@ main() {
         ;;
     manager)
         docker-push manager
+        ;;
+    trainer)
+        docker-push trainer
     esac
 }
 

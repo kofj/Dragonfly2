@@ -1,5 +1,5 @@
 /*
- *     Copyright 2020 The Dragonfly Authors
+ *     Copyright 2022 The Dragonfly Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,108 +17,85 @@
 package server
 
 import (
-	"context"
 	"time"
 
-	"d7y.io/dragonfly/v2/pkg/unit"
-	"github.com/golang/protobuf/ptypes/empty"
+	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
+	grpc_zap "github.com/grpc-ecosystem/go-grpc-middleware/logging/zap"
+	grpc_ratelimit "github.com/grpc-ecosystem/go-grpc-middleware/ratelimit"
+	grpc_recovery "github.com/grpc-ecosystem/go-grpc-middleware/recovery"
+	grpc_validator "github.com/grpc-ecosystem/go-grpc-middleware/validator"
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/reflection"
+
+	schedulerv1 "d7y.io/api/pkg/apis/scheduler/v1"
+	schedulerv2 "d7y.io/api/pkg/apis/scheduler/v2"
 
 	logger "d7y.io/dragonfly/v2/internal/dflog"
 	"d7y.io/dragonfly/v2/pkg/rpc"
-	"d7y.io/dragonfly/v2/pkg/rpc/scheduler"
-	"d7y.io/dragonfly/v2/pkg/util/net/iputils"
-	"d7y.io/dragonfly/v2/scheduler/metrics"
-	"go.uber.org/zap"
-	"google.golang.org/grpc"
 )
 
-// SchedulerServer refer to scheduler.SchedulerServer
-type SchedulerServer interface {
-	// RegisterPeerTask registers a peer into one task.
-	RegisterPeerTask(context.Context, *scheduler.PeerTaskRequest) (*scheduler.RegisterResult, error)
-	// ReportPieceResult reports piece results and receives peer packets.
-	ReportPieceResult(scheduler.Scheduler_ReportPieceResultServer) error
-	// ReportPeerResult reports downloading result for the peer task.
-	ReportPeerResult(context.Context, *scheduler.PeerResult) error
-	// LeaveTask makes the peer leaving from scheduling overlay for the task.
-	LeaveTask(context.Context, *scheduler.PeerTarget) error
-}
+const (
+	// DefaultQPS is default qps of grpc server.
+	DefaultQPS = 10 * 1000
 
-type proxy struct {
-	server SchedulerServer
-	scheduler.UnimplementedSchedulerServer
-}
+	// DefaultBurst is default burst of grpc server.
+	DefaultBurst = 20 * 1000
 
-func New(schedulerServer SchedulerServer, opts ...grpc.ServerOption) *grpc.Server {
-	grpcServer := grpc.NewServer(append(rpc.DefaultServerOptions, opts...)...)
-	scheduler.RegisterSchedulerServer(grpcServer, &proxy{server: schedulerServer})
+	// DefaultMaxConnectionIdle is default max connection idle of grpc keepalive.
+	DefaultMaxConnectionIdle = 10 * time.Minute
+
+	// DefaultMaxConnectionAge is default max connection age of grpc keepalive.
+	DefaultMaxConnectionAge = 12 * time.Hour
+
+	// DefaultMaxConnectionAgeGrace is default max connection age grace of grpc keepalive.
+	DefaultMaxConnectionAgeGrace = 5 * time.Minute
+)
+
+// New returns a grpc server instance and register service on grpc server.
+func New(schedulerServerV1 schedulerv1.SchedulerServer, schedulerServerV2 schedulerv2.SchedulerServer, opts ...grpc.ServerOption) *grpc.Server {
+	limiter := rpc.NewRateLimiterInterceptor(DefaultQPS, DefaultBurst)
+
+	grpcServer := grpc.NewServer(append([]grpc.ServerOption{
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			MaxConnectionIdle:     DefaultMaxConnectionIdle,
+			MaxConnectionAge:      DefaultMaxConnectionAge,
+			MaxConnectionAgeGrace: DefaultMaxConnectionAgeGrace,
+		}),
+		grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(
+			grpc_ratelimit.UnaryServerInterceptor(limiter),
+			rpc.ConvertErrorUnaryServerInterceptor,
+			otelgrpc.UnaryServerInterceptor(),
+			grpc_prometheus.UnaryServerInterceptor,
+			grpc_zap.UnaryServerInterceptor(logger.GrpcLogger.Desugar()),
+			grpc_validator.UnaryServerInterceptor(),
+			grpc_recovery.UnaryServerInterceptor(),
+		)),
+		grpc.StreamInterceptor(grpc_middleware.ChainStreamServer(
+			grpc_ratelimit.StreamServerInterceptor(limiter),
+			rpc.ConvertErrorStreamServerInterceptor,
+			otelgrpc.StreamServerInterceptor(),
+			grpc_prometheus.StreamServerInterceptor,
+			grpc_zap.StreamServerInterceptor(logger.GrpcLogger.Desugar()),
+			grpc_validator.StreamServerInterceptor(),
+			grpc_recovery.StreamServerInterceptor(),
+		)),
+	}, opts...)...)
+
+	// Register servers on v1 version of the grpc server.
+	schedulerv1.RegisterSchedulerServer(grpcServer, schedulerServerV1)
+
+	// Register servers on v2 version of the grpc server.
+	schedulerv2.RegisterSchedulerServer(grpcServer, schedulerServerV2)
+
+	// Register health on grpc server.
+	healthpb.RegisterHealthServer(grpcServer, health.NewServer())
+
+	// Register reflection on grpc server.
+	reflection.Register(grpcServer)
 	return grpcServer
-}
-
-func (p *proxy) RegisterPeerTask(ctx context.Context, req *scheduler.PeerTaskRequest) (*scheduler.RegisterResult, error) {
-	metrics.RegisterPeerTaskCount.Inc()
-	taskID := "unknown"
-	isSuccess := false
-	resp, err := p.server.RegisterPeerTask(ctx, req)
-	if err != nil {
-		taskID = resp.TaskId
-		isSuccess = true
-		metrics.RegisterPeerTaskFailureCount.Inc()
-	}
-	metrics.PeerTaskCounter.WithLabelValues(resp.SizeScope.String()).Inc()
-
-	peerHost := req.PeerHost
-	logger.StatPeerLogger.Info("Register Peer Task",
-		zap.Bool("Success", isSuccess),
-		zap.String("TaskID", taskID),
-		zap.String("URL", req.Url),
-		zap.String("PeerIP", peerHost.Ip),
-		zap.String("PeerHostName", peerHost.HostName),
-		zap.String("SecurityDomain", peerHost.SecurityDomain),
-		zap.String("IDC", peerHost.Idc),
-		zap.String("SchedulerIP", iputils.HostIP),
-		zap.String("SchedulerHostName", iputils.HostName),
-	)
-
-	return resp, err
-}
-
-func (p *proxy) ReportPieceResult(stream scheduler.Scheduler_ReportPieceResultServer) error {
-	metrics.ConcurrentScheduleGauge.Inc()
-	defer metrics.ConcurrentScheduleGauge.Dec()
-
-	return p.server.ReportPieceResult(stream)
-}
-
-func (p *proxy) ReportPeerResult(ctx context.Context, req *scheduler.PeerResult) (*empty.Empty, error) {
-	metrics.DownloadCount.Inc()
-	if req.Success {
-		metrics.P2PTraffic.Add(float64(req.Traffic))
-		metrics.PeerTaskDownloadDuration.Observe(float64(req.Cost))
-	} else {
-		metrics.DownloadFailureCount.Inc()
-	}
-
-	err := p.server.ReportPeerResult(ctx, req)
-
-	logger.StatPeerLogger.Info("Finish Peer Task",
-		zap.Bool("Success", req.Success),
-		zap.String("TaskID", req.TaskId),
-		zap.String("PeerID", req.PeerId),
-		zap.String("URL", req.Url),
-		zap.String("PeerIP", req.SrcIp),
-		zap.String("SecurityDomain", req.SecurityDomain),
-		zap.String("IDC", req.Idc),
-		zap.String("SchedulerIP", iputils.HostIP),
-		zap.String("SchedulerHostName", iputils.HostName),
-		zap.String("ContentLength", unit.Bytes(req.ContentLength).String()),
-		zap.String("Traffic", unit.Bytes(uint64(req.Traffic)).String()),
-		zap.Duration("Cost", time.Duration(int64(req.Cost))),
-		zap.Int32("Code", int32(req.Code)))
-
-	return new(empty.Empty), err
-}
-
-func (p *proxy) LeaveTask(ctx context.Context, pt *scheduler.PeerTarget) (*empty.Empty, error) {
-	return new(empty.Empty), p.server.LeaveTask(ctx, pt)
 }

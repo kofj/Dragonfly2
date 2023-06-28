@@ -20,7 +20,15 @@ const (
 	HeaderDragonflyFilter = "X-Dragonfly-Filter"
 	HeaderDragonflyPeer   = "X-Dragonfly-Peer"
 	HeaderDragonflyTask   = "X-Dragonfly-Task"
-	HeaderDragonflyBiz    = "X-Dragonfly-Biz"
-	// HeaderDragonflyRegistry is used for dynamic registry mirrors
+	HeaderDragonflyRange  = "X-Dragonfly-Range"
+	// HeaderDragonflyTag different HeaderDragonflyTag for the same url will be divided into different P2P overlay
+	HeaderDragonflyTag = "X-Dragonfly-Tag"
+	// HeaderDragonflyApplication is used for statistics and traffic control
+	HeaderDragonflyApplication = "X-Dragonfly-Application"
+	// HeaderDragonflyPriority scheduler will schedule tasks according to priority
+	HeaderDragonflyPriority = "X-Dragonfly-Priority"
+	// HeaderDragonflyRegistry is used for dynamic registry mirrors.
 	HeaderDragonflyRegistry = "X-Dragonfly-Registry"
+	// HeaderDragonflyObjectMetaDigest is used for digest of object storage.
+	HeaderDragonflyObjectMetaDigest = "X-Dragonfly-Object-Meta-Digest"
 )

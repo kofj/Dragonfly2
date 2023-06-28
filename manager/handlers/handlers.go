@@ -21,15 +21,16 @@ import (
 	"strconv"
 	"strings"
 
-	"d7y.io/dragonfly/v2/manager/service"
 	"github.com/gin-gonic/gin"
+
+	"d7y.io/dragonfly/v2/manager/service"
 )
 
 type Handlers struct {
-	service service.REST
+	service service.Service
 }
 
-func New(service service.REST) *Handlers {
+func New(service service.Service) *Handlers {
 	return &Handlers{
 		service: service,
 	}
@@ -47,8 +48,8 @@ func (h *Handlers) setPaginationDefault(page, perPage *int) {
 
 func (h *Handlers) setPaginationLinkHeader(ctx *gin.Context, page, perPage, totalCount int) {
 	totalPage := totalCount / perPage
-	if totalPage == 0 {
-		totalPage = 1
+	if totalCount%perPage > 0 {
+		totalPage++
 	}
 
 	var prevPage int

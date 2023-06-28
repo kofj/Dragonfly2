@@ -19,8 +19,11 @@ package handlers
 import (
 	"net/http"
 
-	"d7y.io/dragonfly/v2/manager/types"
 	"github.com/gin-gonic/gin"
+
+	// nolint
+	_ "d7y.io/dragonfly/v2/manager/models"
+	"d7y.io/dragonfly/v2/manager/types"
 )
 
 // @Summary Create Role
@@ -40,8 +43,8 @@ func (h *Handlers) CreateRole(ctx *gin.Context) {
 		return
 	}
 
-	if err := h.service.CreateRole(json); err != nil {
-		ctx.Error(err)
+	if err := h.service.CreateRole(ctx.Request.Context(), json); err != nil {
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
@@ -57,7 +60,7 @@ func (h *Handlers) CreateRole(ctx *gin.Context) {
 // @Success 200
 // @Failure 400
 // @Failure 500
-// @Router /roles/:role [delete]
+// @Router /roles/{role} [delete]
 func (h *Handlers) DestroyRole(ctx *gin.Context) {
 	var params types.RoleParams
 	if err := ctx.ShouldBindUri(&params); err != nil {
@@ -65,8 +68,8 @@ func (h *Handlers) DestroyRole(ctx *gin.Context) {
 		return
 	}
 
-	if ok, err := h.service.DestroyRole(params.Role); err != nil {
-		ctx.Error(err)
+	if ok, err := h.service.DestroyRole(ctx.Request.Context(), params.Role); err != nil {
+		ctx.Error(err) // nolint: errcheck
 		return
 	} else if !ok {
 		ctx.Status(http.StatusNotFound)
@@ -85,7 +88,7 @@ func (h *Handlers) DestroyRole(ctx *gin.Context) {
 // @Success 200
 // @Failure 400
 // @Failure 500
-// @Router /roles/:role [get]
+// @Router /roles/{role} [get]
 func (h *Handlers) GetRole(ctx *gin.Context) {
 	var params types.RoleParams
 	if err := ctx.ShouldBindUri(&params); err != nil {
@@ -93,7 +96,7 @@ func (h *Handlers) GetRole(ctx *gin.Context) {
 		return
 	}
 
-	ctx.JSON(http.StatusOK, h.service.GetRole(params.Role))
+	ctx.JSON(http.StatusOK, h.service.GetRole(ctx.Request.Context(), params.Role))
 }
 
 // @Summary Get Roles
@@ -106,7 +109,7 @@ func (h *Handlers) GetRole(ctx *gin.Context) {
 // @Failure 500
 // @Router /roles [get]
 func (h *Handlers) GetRoles(ctx *gin.Context) {
-	roles := h.service.GetRoles()
+	roles := h.service.GetRoles(ctx.Request.Context())
 	ctx.JSON(http.StatusOK, roles)
 }
 
@@ -120,7 +123,7 @@ func (h *Handlers) GetRoles(ctx *gin.Context) {
 // @Success 200
 // @Failure 400
 // @Failure 500
-// @Router /roles/:role/permissions [post]
+// @Router /roles/{role}/permissions [post]
 func (h *Handlers) AddPermissionForRole(ctx *gin.Context) {
 	var params types.RoleParams
 	if err := ctx.ShouldBindUri(&params); err != nil {
@@ -134,8 +137,8 @@ func (h *Handlers) AddPermissionForRole(ctx *gin.Context) {
 		return
 	}
 
-	if ok, err := h.service.AddPermissionForRole(params.Role, json); err != nil {
-		ctx.Error(err)
+	if ok, err := h.service.AddPermissionForRole(ctx.Request.Context(), params.Role, json); err != nil {
+		ctx.Error(err) // nolint: errcheck
 		return
 	} else if !ok {
 		ctx.Status(http.StatusConflict)
@@ -155,7 +158,7 @@ func (h *Handlers) AddPermissionForRole(ctx *gin.Context) {
 // @Success 200
 // @Failure 400
 // @Failure 500
-// @Router /roles/:role/permissions [delete]
+// @Router /roles/{role}/permissions [delete]
 func (h *Handlers) DeletePermissionForRole(ctx *gin.Context) {
 	var params types.RoleParams
 	if err := ctx.ShouldBindUri(&params); err != nil {
@@ -169,8 +172,8 @@ func (h *Handlers) DeletePermissionForRole(ctx *gin.Context) {
 		return
 	}
 
-	if ok, err := h.service.DeletePermissionForRole(params.Role, json); err != nil {
-		ctx.Error(err)
+	if ok, err := h.service.DeletePermissionForRole(ctx.Request.Context(), params.Role, json); err != nil {
+		ctx.Error(err) // nolint: errcheck
 		return
 	} else if !ok {
 		ctx.Status(http.StatusNotFound)

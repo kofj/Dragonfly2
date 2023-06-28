@@ -5,10 +5,10 @@ set -o errexit
 set -o pipefail
 
 BIN_DIR="../bin"
-CDN_BINARY_NAME=cdn
 DFGET_BINARY_NAME=dfget
 SCHEDULER_BINARY_NAME=scheduler
 MANAGER_BINARY_NAME=manager
+TRAINER_BINARY_NAME=trainer
 
 curDir=$(cd "$(dirname "$0")" && pwd)
 cd "${curDir}" || return
@@ -17,9 +17,6 @@ cd "${curDir}" || return
 
 install() {
     case "${1-}" in
-    cdn)
-        install-cdn
-        ;;
     dfget)
         install-dfget
         ;;
@@ -28,22 +25,10 @@ install() {
         ;;
     manager)
         install-manager
+        ;;
+    trainer)
+        install-trainer
     esac
-}
-
-install-cdn() {
-    local installCdnDir="${INSTALL_HOME}/${INSTALL_CDN_PATH}"
-    echo "install: ${installCdnDir}"
-    createDir "${installCdnDir}"
-
-    cp "${BIN_DIR}/${GOOS}_${GOARCH}/${CDN_BINARY_NAME}" "${installCdnDir}"
-
-    createLink "${installCdnDir}/${CDN_BINARY_NAME}" /usr/local/bin/cdn
-}
-
-uninstall-cdn() {
-    echo "unlink /usr/local/bin/cdn"
-    test -e /usr/local/bin/cdn && unlink /usr/local/bin/cdn
 }
 
 install-dfget() {
@@ -89,6 +74,21 @@ install-manager() {
 uninstall-manager() {
     echo "unlink /usr/local/bin/manager"
     test -e /usr/local/bin/manager && unlink /usr/local/bin/manager
+}
+
+install-trainer() {
+    local bin="${INSTALL_HOME}/${INSTALL_BIN_PATH}"
+    echo "install: ${bin}"
+    mkdir -p "${bin}"
+
+    cp "${BIN_DIR}/${GOOS}_${GOARCH}/${TRAINER_BINARY_NAME}" "${bin}"
+
+    createLink "${bin}/${TRAINER_BINARY_NAME}" /usr/local/bin/trainer
+}
+
+uninstall-trainer() {
+    echo "unlink /usr/local/bin/trainer"
+    test -e /usr/local/bin/trainer && unlink /usr/local/bin/trainer
 }
 
 createLink() {

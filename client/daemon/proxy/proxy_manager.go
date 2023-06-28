@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+//go:generate mockgen -destination mocks/proxy_manager_mock.go -source proxy_manager.go -package mocks
+
 package proxy
 
 import (
@@ -27,20 +29,26 @@ import (
 	"os"
 	"reflect"
 
-	"github.com/pkg/errors"
 	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
+
+	schedulerv1 "d7y.io/api/pkg/apis/scheduler/v1"
 
 	"d7y.io/dragonfly/v2/client/config"
 	"d7y.io/dragonfly/v2/client/daemon/peer"
 	logger "d7y.io/dragonfly/v2/internal/dflog"
-	"d7y.io/dragonfly/v2/pkg/rpc/scheduler"
 )
 
 type Manager interface {
+	ConfigWatcher
 	Serve(net.Listener) error
 	ServeSNI(net.Listener) error
 	Stop() error
 	IsEnabled() bool
+}
+
+type ConfigWatcher interface {
+	Watch(*config.ProxyOption)
 }
 
 type proxyManager struct {
@@ -51,25 +59,30 @@ type proxyManager struct {
 
 var _ Manager = (*proxyManager)(nil)
 
-func NewProxyManager(peerHost *scheduler.PeerHost, peerTaskManager peer.TaskManager, opts *config.ProxyOption) (Manager, error) {
+func NewProxyManager(peerHost *schedulerv1.PeerHost, peerTaskManager peer.TaskManager, proxyOption *config.ProxyOption) (Manager, error) {
 	// proxy is option, when nil, just disable it
-	if opts == nil {
+	if proxyOption == nil {
 		logger.Infof("proxy config is empty, disabled")
 		return &proxyManager{}, nil
 	}
-	registry := opts.RegistryMirror
-	proxies := opts.Proxies
-	hijackHTTPS := opts.HijackHTTPS
-	whiteList := opts.WhiteList
+	registry := proxyOption.RegistryMirror
+	proxyRules := proxyOption.ProxyRules
+	hijackHTTPS := proxyOption.HijackHTTPS
+	whiteList := proxyOption.WhiteList
 
 	options := []Option{
 		WithPeerHost(peerHost),
+		WithPeerIDGenerator(peer.NewPeerIDGenerator(peerHost.Ip)),
 		WithPeerTaskManager(peerTaskManager),
-		WithRules(proxies),
+		WithRules(proxyRules),
 		WithWhiteList(whiteList),
-		WithMaxConcurrency(opts.MaxConcurrency),
-		WithDefaultFilter(opts.DefaultFilter),
-		WithBasicAuth(opts.BasicAuth),
+		WithMaxConcurrency(proxyOption.MaxConcurrency),
+		WithDefaultFilter(proxyOption.DefaultFilter),
+		WithDefaultTag(proxyOption.DefaultTag),
+		WithDefaultApplication(proxyOption.DefaultApplication),
+		WithDefaultPriority(proxyOption.DefaultPriority),
+		WithBasicAuth(proxyOption.BasicAuth),
+		WithDumpHTTPContent(proxyOption.DumpHTTPContent),
 	}
 
 	if registry != nil {
@@ -77,9 +90,9 @@ func NewProxyManager(peerHost *scheduler.PeerHost, peerTaskManager peer.TaskMana
 		options = append(options, WithRegistryMirror(registry))
 	}
 
-	if len(proxies) > 0 {
-		logger.Infof("load %d proxy rules", len(proxies))
-		for i, r := range proxies {
+	if len(proxyRules) > 0 {
+		logger.Infof("load %d proxy rules", len(proxyRules))
+		for i, r := range proxyRules {
 			method := "with dragonfly"
 			if r.Direct {
 				method = "directly"
@@ -97,7 +110,7 @@ func NewProxyManager(peerHost *scheduler.PeerHost, peerTaskManager peer.TaskMana
 		if hijackHTTPS.Cert != "" && hijackHTTPS.Key != "" {
 			cert, err := certFromFile(hijackHTTPS.Cert, hijackHTTPS.Key)
 			if err != nil {
-				return nil, errors.Wrap(err, "cert from file")
+				return nil, fmt.Errorf("cert from file: %w", err)
 			}
 			if cert.Leaf != nil && cert.Leaf.IsCA {
 				logger.Debugf("hijack https request with CA <%s>", cert.Leaf.Subject.CommonName)
@@ -108,13 +121,13 @@ func NewProxyManager(peerHost *scheduler.PeerHost, peerTaskManager peer.TaskMana
 
 	p, err := NewProxy(options...)
 	if err != nil {
-		return nil, errors.Wrap(err, "create proxy")
+		return nil, fmt.Errorf("create proxy: %w", err)
 	}
 
 	return &proxyManager{
 		Server:       &http.Server{},
 		Proxy:        p,
-		ListenOption: opts.ListenOption,
+		ListenOption: proxyOption.ListenOption,
 	}, nil
 }
 
@@ -136,6 +149,26 @@ func (pm *proxyManager) IsEnabled() bool {
 	return pm.ListenOption.TCPListen != nil && pm.ListenOption.TCPListen.PortRange.Start != 0
 }
 
+func (pm *proxyManager) Watch(opt *config.ProxyOption) {
+	old, err := yaml.Marshal(pm.Proxy.rules.Load().([]*config.ProxyRule))
+	if err != nil {
+		logger.Errorf("yaml marshal proxy rules error: %s", err.Error())
+		return
+	}
+
+	fresh, err := yaml.Marshal(opt.ProxyRules)
+	if err != nil {
+		logger.Errorf("yaml marshal proxy rules error: %s", err.Error())
+		return
+	}
+	logger.Infof("previous rules: %s", string(old))
+	logger.Infof("current rules: %s", string(fresh))
+	if string(old) != string(fresh) {
+		logger.Infof("update proxy rules")
+		pm.Proxy.rules.Store(opt.ProxyRules)
+	}
+}
+
 func newDirectHandler() *http.ServeMux {
 	s := http.DefaultServeMux
 	s.HandleFunc("/args", getArgs)
@@ -154,17 +187,17 @@ func getEnv(w http.ResponseWriter, r *http.Request) {
 // ensureStringKey recursively ensures all maps in the given interface are string,
 // to make the result marshalable by json. This is meant to be used with viper
 // settings, so only maps and slices are handled.
-func ensureStringKey(obj interface{}) interface{} {
+func ensureStringKey(obj any) any {
 	rt, rv := reflect.TypeOf(obj), reflect.ValueOf(obj)
 	switch rt.Kind() {
 	case reflect.Map:
-		res := make(map[string]interface{})
+		res := make(map[string]any)
 		for _, k := range rv.MapKeys() {
 			res[fmt.Sprintf("%v", k.Interface())] = ensureStringKey(rv.MapIndex(k).Interface())
 		}
 		return res
 	case reflect.Slice:
-		res := make([]interface{}, rv.Len())
+		res := make([]any, rv.Len())
 		for i := 0; i < rv.Len(); i++ {
 			res[i] = ensureStringKey(rv.Index(i).Interface())
 		}
@@ -190,18 +223,17 @@ func getArgs(w http.ResponseWriter, r *http.Request) {
 }
 
 func certFromFile(certFile string, keyFile string) (*tls.Certificate, error) {
-
 	// cert.Certificate is a chain of one or more certificates, leaf first.
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		return nil, errors.Wrap(err, "load cert")
+		return nil, fmt.Errorf("load cert: %w", err)
 	}
 	logger.Infof("use self-signed certificate (%s, %s) for https hijacking", certFile, keyFile)
 
 	// leaf is CA cert or server cert
 	leaf, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
-		return nil, errors.Wrap(err, "load leaf cert")
+		return nil, fmt.Errorf("load leaf cert: %w", err)
 	}
 
 	cert.Leaf = leaf

@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"testing"
@@ -28,31 +27,26 @@ import (
 	"github.com/golang/mock/gomock"
 	testifyassert "github.com/stretchr/testify/assert"
 
+	"d7y.io/dragonfly/v2/client/daemon/peer"
 	"d7y.io/dragonfly/v2/client/daemon/test"
-	mock_peer "d7y.io/dragonfly/v2/client/daemon/test/mock/peer"
-	"d7y.io/dragonfly/v2/pkg/rpc/scheduler"
 )
-
-func TestMain(m *testing.M) {
-	os.Exit(m.Run())
-}
 
 func TestTransport_RoundTrip(t *testing.T) {
 	assert := testifyassert.New(t)
 	ctrl := gomock.NewController(t)
-	testData, err := ioutil.ReadFile(test.File)
+	testData, err := os.ReadFile(test.File)
 	assert.Nil(err, "load test file")
 
 	var url = "http://x/y"
-	peerTaskManager := mock_peer.NewMockTaskManager(ctrl)
-	peerTaskManager.EXPECT().StartStreamPeerTask(gomock.Any(), gomock.Any()).DoAndReturn(
-		func(ctx context.Context, req *scheduler.PeerTaskRequest) (io.ReadCloser, map[string]string, error) {
-			assert.Equal(req.Url, url)
-			return ioutil.NopCloser(bytes.NewBuffer(testData)), nil, nil
+	peerTaskManager := peer.NewMockTaskManager(ctrl)
+	peerTaskManager.EXPECT().StartStreamTask(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, req *peer.StreamTaskRequest) (io.ReadCloser, map[string]string, error) {
+			assert.Equal(req.URL, url)
+			return io.NopCloser(bytes.NewBuffer(testData)), nil, nil
 		},
 	)
 	rt, _ := New(
-		WithPeerHost(&scheduler.PeerHost{}),
+		WithPeerIDGenerator(peer.NewPeerIDGenerator("127.0.0.1")),
 		WithPeerTaskManager(peerTaskManager),
 		WithCondition(func(r *http.Request) bool {
 			return true
@@ -65,7 +59,7 @@ func TestTransport_RoundTrip(t *testing.T) {
 		return
 	}
 	defer resp.Body.Close()
-	output, err := ioutil.ReadAll(resp.Body)
+	output, err := io.ReadAll(resp.Body)
 	assert.Nil(err)
 	if err != nil {
 		return

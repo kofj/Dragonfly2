@@ -23,20 +23,19 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
 
+	"d7y.io/dragonfly/v2/client/util"
 	"d7y.io/dragonfly/v2/cmd/dependency/base"
-	logger "d7y.io/dragonfly/v2/internal/dflog"
-	"d7y.io/dragonfly/v2/pkg/unit"
-	"github.com/pkg/errors"
-	"golang.org/x/time/rate"
-
 	"d7y.io/dragonfly/v2/internal/dferrors"
-	"d7y.io/dragonfly/v2/pkg/basic"
-	"d7y.io/dragonfly/v2/pkg/util/net/urlutils"
-	"d7y.io/dragonfly/v2/pkg/util/stringutils"
+	logger "d7y.io/dragonfly/v2/internal/dflog"
+	"d7y.io/dragonfly/v2/pkg/net/url"
+	"d7y.io/dragonfly/v2/pkg/os/user"
+	pkgstrings "d7y.io/dragonfly/v2/pkg/strings"
+	"d7y.io/dragonfly/v2/pkg/unit"
 )
 
 type DfgetConfig = ClientOption
@@ -68,12 +67,14 @@ type ClientOption struct {
 	// Tag identify download task, it is available merely when md5 param not exist.
 	Tag string `yaml:"tag,omitempty" mapstructure:"tag,omitempty"`
 
-	// CallSystem system name that executes dfget.
-	CallSystem string `yaml:"callSystem,omitempty" mapstructure:"callSystem,omitempty"`
+	// Application name that executes dfget.
+	Application string `yaml:"application,omitempty" mapstructure:"application,omitempty"`
 
-	// Pattern download pattern, must be 'p2p' or 'cdn' or 'source',
-	// default:`p2p`.
-	Pattern string `yaml:"pattern,omitempty" mapstructure:"pattern,omitempty"`
+	// DaemonSock is daemon download socket path.
+	DaemonSock string `yaml:"daemonSock,omitempty" mapstructure:"daemon-sock,omitempty"`
+
+	// Priority scheduler will schedule tasks according to priority
+	Priority int32 `yaml:"priority,omitempty" mapstructure:"priority,omitempty"`
 
 	// CA certificate to verify when supernode interact with the source.
 	Cacerts []string `yaml:"cacert,omitempty" mapstructure:"cacert,omitempty"`
@@ -88,7 +89,7 @@ type ClientOption struct {
 	Header []string `yaml:"header,omitempty" mapstructure:"header,omitempty"`
 
 	// DisableBackSource indicates whether to not back source to download when p2p fails.
-	DisableBackSource bool `yaml:"disableBackSource,omitempty" mapstructure:"disableBackSource,omitempty"`
+	DisableBackSource bool `yaml:"disableBackSource,omitempty" mapstructure:"disable-back-source,omitempty"`
 
 	// Insecure indicates whether skip secure verify when supernode interact with the source.
 	Insecure bool `yaml:"insecure,omitempty" mapstructure:"insecure,omitempty"`
@@ -96,7 +97,13 @@ type ClientOption struct {
 	// ShowProgress shows progress bar, it's conflict with `--console`.
 	ShowProgress bool `yaml:"show-progress,omitempty" mapstructure:"show-progress,omitempty"`
 
-	RateLimit rate.Limit `yaml:"rateLimit,omitempty" mapstructure:"rateLimit,omitempty"`
+	// LogDir is log directory of dfget.
+	LogDir string `yaml:"logDir,omitempty" mapstructure:"logDir,omitempty"`
+
+	// WorkHome is working directory of dfget.
+	WorkHome string `yaml:"workHome,omitempty" mapstructure:"workHome,omitempty"`
+
+	RateLimit util.RateLimit `yaml:"rateLimit,omitempty" mapstructure:"rateLimit,omitempty"`
 
 	// Config file paths,
 	// default:["/etc/dragonfly/dfget.yaml","/etc/dragonfly.conf"].
@@ -107,6 +114,24 @@ type ClientOption struct {
 
 	// MoreDaemonOptions indicates more options passed to daemon by command line.
 	MoreDaemonOptions string `yaml:"moreDaemonOptions,omitempty" mapstructure:"moreDaemonOptions,omitempty"`
+
+	// Recursive indicates to download all resources in target url, the target source client must support list action
+	Recursive bool `yaml:"recursive,omitempty" mapstructure:"recursive,omitempty"`
+
+	// RecursiveList indicates to list all resources in target url, the target source client must support list action
+	RecursiveList bool `yaml:"recursiveList,omitempty" mapstructure:"list,omitempty"`
+
+	// RecursiveLevel indicates to the maximum number of subdirectories that dfget will recurse into
+	RecursiveLevel uint `yaml:"recursiveLevel,omitempty" mapstructure:"level,omitempty"`
+
+	RecursiveAcceptRegex string `yaml:"acceptRegex,omitempty" mapstructure:"accept-regex,omitempty"`
+
+	RecursiveRejectRegex string `yaml:"rejectRegex,omitempty" mapstructure:"reject-regex,omitempty"`
+
+	KeepOriginalOffset bool `yaml:"keepOriginalOffset,omitempty" mapstructure:"original-offset,omitempty"`
+
+	// Range stands download range for url, like: 0-9, will download 10 bytes from 0 to 9 ([0:9])
+	Range string `yaml:"range,omitempty" mapstructure:"range,omitempty"`
 }
 
 func NewDfgetConfig() *ClientOption {
@@ -115,50 +140,38 @@ func NewDfgetConfig() *ClientOption {
 
 func (cfg *ClientOption) Validate() error {
 	if cfg == nil {
-		return errors.Wrap(dferrors.ErrInvalidArgument, "runtime config")
+		return fmt.Errorf("runtime config: %w", dferrors.ErrInvalidArgument)
 	}
 
-	if !urlutils.IsValidURL(cfg.URL) {
-		return errors.Wrapf(dferrors.ErrInvalidArgument, "url: %v", cfg.URL)
+	if !url.IsValid(cfg.URL) {
+		return fmt.Errorf("url %s: %w", cfg.URL, dferrors.ErrInvalidArgument)
+	}
+
+	if _, err := regexp.Compile(cfg.RecursiveAcceptRegex); err != nil {
+		return err
+	}
+
+	if _, err := regexp.Compile(cfg.RecursiveRejectRegex); err != nil {
+		return err
 	}
 
 	if err := cfg.checkOutput(); err != nil {
-		return errors.Wrapf(dferrors.ErrInvalidArgument, "output: %v", err)
+		return fmt.Errorf("output %s: %w", err.Error(), dferrors.ErrInvalidArgument)
+	}
+
+	if err := cfg.checkHeader(); err != nil {
+		return fmt.Errorf("output %s: %w", err.Error(), dferrors.ErrInvalidHeader)
+	}
+
+	if int64(cfg.RateLimit.Limit) < DefaultMinRate.ToNumber() {
+		return fmt.Errorf("rate limit must be greater than %s: %w", DefaultMinRate.String(), dferrors.ErrInvalidArgument)
 	}
 
 	return nil
 }
 
 func (cfg *ClientOption) Convert(args []string) error {
-	var err error
-
-	if cfg.Output, err = filepath.Abs(cfg.Output); err != nil {
-		return err
-	}
-
-	if cfg.URL == "" && len(args) > 0 {
-		cfg.URL = args[0]
-	}
-
-	if cfg.Digest != "" {
-		cfg.Tag = ""
-	}
-
-	if cfg.Console {
-		cfg.ShowProgress = false
-	}
-
-	return nil
-}
-
-func (cfg *ClientOption) String() string {
-	js, _ := json.Marshal(cfg)
-	return string(js)
-}
-
-// This function must be called after checkURL
-func (cfg *ClientOption) checkOutput() error {
-	if stringutils.IsBlank(cfg.Output) {
+	if pkgstrings.IsBlank(cfg.Output) {
 		url := strings.TrimRight(cfg.URL, "/")
 		idx := strings.LastIndexByte(url, '/')
 		if idx < 0 {
@@ -174,28 +187,72 @@ func (cfg *ClientOption) checkOutput() error {
 		}
 		cfg.Output = absPath
 	}
+	if cfg.URL == "" && len(args) > 0 {
+		cfg.URL = args[0]
+	}
 
-	dir, _ := path.Split(cfg.Output)
-	if err := MkdirAll(dir, 0777, basic.UserID, basic.UserGroup); err != nil {
+	if cfg.Digest != "" {
+		cfg.Tag = ""
+	}
+
+	if cfg.Console {
+		cfg.ShowProgress = false
+	}
+	return nil
+}
+
+func (cfg *ClientOption) String() string {
+	data, _ := json.Marshal(cfg)
+	return string(data)
+}
+
+// checkHeader is for checking the header format
+func (cfg *ClientOption) checkHeader() error {
+	if len(cfg.Header) == 0 {
+		return nil
+	}
+
+	for _, header := range cfg.Header {
+		if !strings.Contains(header, ":") {
+			return fmt.Errorf("header format error: %v", header)
+		}
+		idx := strings.Index(header, ":")
+		if len(strings.TrimSpace(header[:idx])) == 0 || len(strings.TrimSpace(header[idx+1:])) == 0 {
+			return fmt.Errorf("header format error: %v", header)
+		}
+	}
+
+	return nil
+}
+
+// This function must be called after checkURL
+func (cfg *ClientOption) checkOutput() error {
+	if !filepath.IsAbs(cfg.Output) {
+		return fmt.Errorf("path[%s] is not absolute path", cfg.Output)
+	}
+	outputDir, _ := path.Split(cfg.Output)
+	if err := MkdirAll(outputDir, 0777, os.Getuid(), os.Getgid()); err != nil {
 		return err
 	}
 
-	if f, err := os.Stat(cfg.Output); err == nil && f.IsDir() {
+	f, err := os.Stat(cfg.Output)
+	// when not recursive download, need a file
+	if !cfg.Recursive && err == nil && f.IsDir() {
 		return fmt.Errorf("path[%s] is directory but requires file path", cfg.Output)
 	}
 
 	// check permission
-	for dir := cfg.Output; !stringutils.IsBlank(dir); dir = filepath.Dir(dir) {
+	for dir := cfg.Output; !pkgstrings.IsBlank(dir); dir = filepath.Dir(dir) {
 		if err := syscall.Access(dir, syscall.O_RDWR); err == nil {
 			break
 		} else if os.IsPermission(err) || dir == "/" {
-			return fmt.Errorf("user[%s] path[%s] %v", basic.Username, cfg.Output, err)
+			return fmt.Errorf("user[%s] path[%s] %v", user.Username(), cfg.Output, err)
 		}
 	}
 	return nil
 }
 
-// MkdirAll make directories recursive, and changes uid, gid to latest directory.
+// MkdirAll make directories recursive, and changes uid, gid to the latest directory.
 // For example: the path /data/x exists, uid=1, gid=1
 // when call MkdirAll("/data/x/y/z", 0755, 2, 2)
 // MkdirAll creates /data/x/y and change owner to 2:2, creates /data/x/y/z and change owner to 2:2

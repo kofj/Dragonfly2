@@ -1,4 +1,4 @@
-// +build linux
+//go:build linux
 
 /*
  *     Copyright 2020 The Dragonfly Authors
@@ -18,20 +18,31 @@
 
 package config
 
+import (
+	"golang.org/x/time/rate"
+
+	"d7y.io/dragonfly/v2/client/util"
+)
+
 var dfgetConfig = ClientOption{
-	URL:               "",
-	Output:            "",
-	Timeout:           0,
+	URL:     "",
+	Output:  "",
+	Timeout: 0,
+	RateLimit: util.RateLimit{
+		Limit: rate.Limit(DefaultTotalDownloadLimit),
+	},
 	Md5:               "",
 	DigestMethod:      "",
 	DigestValue:       "",
 	Tag:               "",
-	CallSystem:        "",
-	Pattern:           "",
+	Application:       "",
+	Priority:          0,
 	Cacerts:           nil,
 	Filter:            "",
 	Header:            nil,
 	DisableBackSource: false,
 	Insecure:          false,
 	ShowProgress:      false,
+	Recursive:         false,
+	RecursiveLevel:    5,
 }

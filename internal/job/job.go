@@ -19,28 +19,28 @@ package job
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
-
-	machineryv1tasks "github.com/RichardKnop/machinery/v1/tasks"
-	"github.com/go-redis/redis/v8"
-	"github.com/pkg/errors"
 
 	"github.com/RichardKnop/machinery/v1"
 	machineryv1config "github.com/RichardKnop/machinery/v1/config"
-)
+	machineryv1log "github.com/RichardKnop/machinery/v1/log"
+	machineryv1tasks "github.com/RichardKnop/machinery/v1/tasks"
+	"github.com/go-redis/redis/v8"
 
-const (
-	DefaultResultsExpireIn = 86400
+	logger "d7y.io/dragonfly/v2/internal/dflog"
 )
 
 type Config struct {
-	Host      string
-	Port      int
-	Password  string
-	BrokerDB  int
-	BackendDB int
+	Addrs      []string
+	MasterName string
+	Username   string
+	Password   string
+	BrokerDB   int
+	BackendDB  int
 }
 
 type Job struct {
@@ -50,32 +50,33 @@ type Job struct {
 }
 
 func New(cfg *Config, queue Queue) (*Job, error) {
-	broker := fmt.Sprintf("redis://%s@%s:%d/%d", cfg.Password, cfg.Host, cfg.Port, cfg.BrokerDB)
-	if err := ping(&redis.Options{
-		Addr:     fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Password: cfg.Password,
-		DB:       cfg.BrokerDB,
+	// Set logger
+	machineryv1log.Set(&MachineryLogger{})
+
+	if err := ping(&redis.UniversalOptions{
+		Addrs:      cfg.Addrs,
+		MasterName: cfg.MasterName,
+		Username:   cfg.Username,
+		Password:   cfg.Password,
+		DB:         cfg.BackendDB,
 	}); err != nil {
 		return nil, err
 	}
 
-	backend := fmt.Sprintf("redis://%s@%s:%d/%d", cfg.Password, cfg.Host, cfg.Port, cfg.BackendDB)
-	if err := ping(&redis.Options{
-		Addr:     fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Password: cfg.Password,
-		DB:       cfg.BackendDB,
-	}); err != nil {
-		return nil, err
-	}
-
-	var cnf = &machineryv1config.Config{
-		Broker:          broker,
+	server, err := machinery.NewServer(&machineryv1config.Config{
+		Broker:          fmt.Sprintf("redis://%s@%s/%d", cfg.Password, strings.Join(cfg.Addrs, ","), cfg.BrokerDB),
 		DefaultQueue:    queue.String(),
-		ResultBackend:   backend,
+		ResultBackend:   fmt.Sprintf("redis://%s@%s/%d", cfg.Password, strings.Join(cfg.Addrs, ","), cfg.BackendDB),
 		ResultsExpireIn: DefaultResultsExpireIn,
-	}
-
-	server, err := machinery.NewServer(cnf)
+		Redis: &machineryv1config.RedisConfig{
+			MasterName:     cfg.MasterName,
+			MaxIdle:        DefaultRedisMaxIdle,
+			IdleTimeout:    DefaultRedisIdleTimeout,
+			ReadTimeout:    DefaultRedisReadTimeout,
+			WriteTimeout:   DefaultRedisWriteTimeout,
+			ConnectTimeout: DefaultRedisConnectTimeout,
+		},
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -86,12 +87,11 @@ func New(cfg *Config, queue Queue) (*Job, error) {
 	}, nil
 }
 
-func ping(options *redis.Options) error {
-	client := redis.NewClient(options)
-	return client.Ping(context.Background()).Err()
+func ping(options *redis.UniversalOptions) error {
+	return redis.NewUniversalClient(options).Ping(context.Background()).Err()
 }
 
-func (t *Job) RegisterJob(namedJobFuncs map[string]interface{}) error {
+func (t *Job) RegisterJob(namedJobFuncs map[string]any) error {
 	return t.Server.RegisterTasks(namedJobFuncs)
 }
 
@@ -104,46 +104,52 @@ type GroupJobState struct {
 	GroupUUID string
 	State     string
 	CreatedAt time.Time
+	JobStates []*machineryv1tasks.TaskState
 }
 
-func (t *Job) GetGroupJobState(groupUUID string) (*GroupJobState, error) {
-	jobStates, err := t.Server.GetBackend().GroupTaskStates(groupUUID, 0)
+func (t *Job) GetGroupJobState(groupID string) (*GroupJobState, error) {
+	taskStates, err := t.Server.GetBackend().GroupTaskStates(groupID, 0)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(jobStates) == 0 {
-		return nil, errors.New("empty group job")
+	if len(taskStates) == 0 {
+		return nil, errors.New("empty group")
 	}
 
-	for _, jobState := range jobStates {
-		if jobState.IsFailure() {
+	for _, taskState := range taskStates {
+		if taskState.IsFailure() {
+			logger.WithGroupAndTaskID(groupID, taskState.TaskUUID).Errorf("task is failed: %#v", taskState)
 			return &GroupJobState{
-				GroupUUID: groupUUID,
+				GroupUUID: groupID,
 				State:     machineryv1tasks.StateFailure,
-				CreatedAt: jobState.CreatedAt,
+				CreatedAt: taskState.CreatedAt,
+				JobStates: taskStates,
 			}, nil
 		}
 	}
 
-	for _, jobState := range jobStates {
-		if !jobState.IsSuccess() {
+	for _, taskState := range taskStates {
+		if !taskState.IsSuccess() {
+			logger.WithGroupAndTaskID(groupID, taskState.TaskUUID).Infof("task is not succeeded: %#v", taskState)
 			return &GroupJobState{
-				GroupUUID: groupUUID,
+				GroupUUID: groupID,
 				State:     machineryv1tasks.StatePending,
-				CreatedAt: jobState.CreatedAt,
+				CreatedAt: taskState.CreatedAt,
+				JobStates: taskStates,
 			}, nil
 		}
 	}
 
 	return &GroupJobState{
-		GroupUUID: groupUUID,
+		GroupUUID: groupID,
 		State:     machineryv1tasks.StateSuccess,
-		CreatedAt: jobStates[0].CreatedAt,
+		CreatedAt: taskStates[0].CreatedAt,
+		JobStates: taskStates,
 	}, nil
 }
 
-func MarshalRequest(v interface{}) ([]machineryv1tasks.Arg, error) {
+func MarshalRequest(v any) ([]machineryv1tasks.Arg, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
@@ -155,7 +161,7 @@ func MarshalRequest(v interface{}) ([]machineryv1tasks.Arg, error) {
 	}}, nil
 }
 
-func UnmarshalResponse(data []reflect.Value, v interface{}) error {
+func UnmarshalResponse(data []reflect.Value, v any) error {
 	if len(data) == 0 {
 		return errors.New("empty data is not specified")
 	}
@@ -166,6 +172,6 @@ func UnmarshalResponse(data []reflect.Value, v interface{}) error {
 	return nil
 }
 
-func UnmarshalRequest(data string, v interface{}) error {
+func UnmarshalRequest(data string, v any) error {
 	return json.Unmarshal([]byte(data), v)
 }

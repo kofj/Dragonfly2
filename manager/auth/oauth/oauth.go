@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+//go:generate mockgen -destination mocks/oauth_mock.go -source oauth.go -package mocks
+
 package oauth
 
 import (
@@ -24,7 +26,7 @@ import (
 )
 
 const (
-	timeout = 5 * time.Second
+	timeout = 2 * time.Minute
 )
 
 const (
@@ -39,7 +41,7 @@ type User struct {
 }
 
 type Oauth interface {
-	AuthCodeURL() string
+	AuthCodeURL() (string, error)
 	Exchange(string) (*oauth2.Token, error)
 	GetUser(*oauth2.Token) (*User, error)
 }
@@ -62,7 +64,7 @@ func New(name, clientID, clientSecret, redirectURL string) (Oauth, error) {
 	return o, nil
 }
 
-func (g *oauth) AuthCodeURL() string {
+func (g *oauth) AuthCodeURL() (string, error) {
 	return g.Oauth.AuthCodeURL()
 }
 

@@ -14,39 +14,116 @@
  * limitations under the License.
  */
 
+//go:generate mockgen -destination piece_downloader_mock.go -source piece_downloader.go -package peer
+
 package peer
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
-	"strings"
+	"net/url"
 	"time"
 
-	"d7y.io/dragonfly/v2/client/daemon/upload"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"google.golang.org/grpc/status"
+
+	commonv1 "d7y.io/api/pkg/apis/common/v1"
+
+	"d7y.io/dragonfly/v2/client/daemon/storage"
 	logger "d7y.io/dragonfly/v2/internal/dflog"
-	"d7y.io/dragonfly/v2/pkg/rpc/base"
-	"d7y.io/dragonfly/v2/pkg/util/digestutils"
+	"d7y.io/dragonfly/v2/pkg/digest"
+	"d7y.io/dragonfly/v2/pkg/source"
 )
 
 type DownloadPieceRequest struct {
+	piece      *commonv1.PieceInfo
+	log        *logger.SugaredLoggerOnWith
+	storage    storage.TaskStorageDriver
 	TaskID     string
+	PeerID     string
 	DstPid     string
 	DstAddr    string
 	CalcDigest bool
-	piece      *base.PieceInfo
+}
+
+type DownloadPieceResult struct {
+	// Size of piece
+	Size int64
+	// BeginTime nanosecond
+	BeginTime int64
+	// FinishTime nanosecond
+	FinishTime int64
+	DstPeerID  string
+	Fail       bool
+	pieceInfo  *commonv1.PieceInfo
 }
 
 type PieceDownloader interface {
 	DownloadPiece(context.Context, *DownloadPieceRequest) (io.Reader, io.Closer, error)
 }
 
+type PieceDownloaderOption func(*pieceDownloader) error
+
 type pieceDownloader struct {
-	transport  http.RoundTripper
+	scheme     string
 	httpClient *http.Client
+}
+
+type pieceDownloadError struct {
+	connectionError bool
+	status          string
+	statusCode      int
+	target          string
+	err             error
+}
+
+type backSourceError struct {
+	err error
+	st  *status.Status
+}
+
+func isConnectionError(err error) bool {
+	if e, ok := err.(*pieceDownloadError); ok {
+		return e.connectionError
+	}
+	return false
+}
+
+func isPieceNotFound(err error) bool {
+	if e, ok := err.(*pieceDownloadError); ok {
+		return e.statusCode == http.StatusNotFound
+	}
+	return false
+}
+
+func isBackSourceError(err error) bool {
+	if _, ok := err.(*backSourceError); ok {
+		return true
+	}
+	if _, ok := err.(*source.UnexpectedStatusCodeError); ok {
+		return true
+	}
+	return false
+}
+
+func (e *pieceDownloadError) Error() string {
+	if e.connectionError {
+		return fmt.Sprintf("connect with %s with error: %s", e.target, e.err)
+	}
+	return fmt.Sprintf("download %s with error status: %s", e.target, e.status)
+}
+
+func (e *backSourceError) Error() string {
+	if e.st != nil {
+		return e.st.Err().Error()
+	}
+	return e.err.Error()
 }
 
 var _ PieceDownloader = (*pieceDownloader)(nil)
@@ -65,70 +142,76 @@ var defaultTransport http.RoundTripper = &http.Transport{
 	ExpectContinueTimeout: 2 * time.Second,
 }
 
-func NewPieceDownloader(timeout time.Duration, opts ...func(*pieceDownloader) error) (PieceDownloader, error) {
-	pd := &pieceDownloader{}
-
-	for _, opt := range opts {
-		if err := opt(pd); err != nil {
-			return nil, err
-		}
+func NewPieceDownloader(timeout time.Duration, caCertPool *x509.CertPool) PieceDownloader {
+	pd := &pieceDownloader{
+		scheme: "http",
+		httpClient: &http.Client{
+			Transport: defaultTransport,
+			Timeout:   timeout,
+		},
 	}
 
-	if pd.transport == nil {
-		pd.transport = defaultTransport
+	if caCertPool != nil {
+		pd.scheme = "https"
+		defaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{ClientCAs: caCertPool}
 	}
 
-	pd.httpClient = &http.Client{
-		Transport: pd.transport,
-		Timeout:   timeout,
-	}
-	return pd, nil
+	return pd
 }
 
-func WithTransport(rt http.RoundTripper) func(*pieceDownloader) error {
-	return func(d *pieceDownloader) error {
-		d.transport = rt
-		return nil
-	}
-}
-
-func (p *pieceDownloader) DownloadPiece(ctx context.Context, d *DownloadPieceRequest) (io.Reader, io.Closer, error) {
-	resp, err := p.httpClient.Do(buildDownloadPieceHTTPRequest(ctx, d))
+func (p *pieceDownloader) DownloadPiece(ctx context.Context, req *DownloadPieceRequest) (io.Reader, io.Closer, error) {
+	httpRequest := p.buildDownloadPieceHTTPRequest(ctx, req)
+	resp, err := p.httpClient.Do(httpRequest)
 	if err != nil {
 		logger.Errorf("task id: %s, piece num: %d, dst: %s, download piece failed: %s",
-			d.TaskID, d.piece.PieceNum, d.DstAddr, err)
-		return nil, nil, err
+			req.TaskID, req.piece.PieceNum, req.DstAddr, err)
+		return nil, nil, &pieceDownloadError{
+			target:          httpRequest.URL.String(),
+			err:             err,
+			connectionError: true,
+		}
 	}
 	if resp.StatusCode > 299 {
-		_, _ = io.Copy(ioutil.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-		return nil, nil, fmt.Errorf("download piece failed with http code: %s", resp.Status)
+		return nil, nil, &pieceDownloadError{
+			target:          httpRequest.URL.String(),
+			err:             err,
+			connectionError: false,
+			status:          resp.Status,
+			statusCode:      resp.StatusCode,
+		}
 	}
-	r := resp.Body.(io.Reader)
-	c := resp.Body.(io.Closer)
-	if d.CalcDigest {
-		r = digestutils.NewDigestReader(io.LimitReader(resp.Body, int64(d.piece.RangeSize)), d.piece.PieceMd5)
+	reader, closer := resp.Body.(io.Reader), resp.Body.(io.Closer)
+	if req.CalcDigest {
+		req.log.Debugf("calculate digest for piece %d, digest: %s", req.piece.PieceNum, req.piece.PieceMd5)
+		reader, err = digest.NewReader(digest.AlgorithmMD5, io.LimitReader(resp.Body, int64(req.piece.RangeSize)), digest.WithEncoded(req.piece.PieceMd5), digest.WithLogger(req.log))
+		if err != nil {
+			_ = closer.Close()
+			req.log.Errorf("init digest reader error: %s", err.Error())
+			return nil, nil, err
+		}
 	}
-	return r, c, nil
+	return reader, closer, nil
 }
 
-func buildDownloadPieceHTTPRequest(ctx context.Context, d *DownloadPieceRequest) *http.Request {
-	b := strings.Builder{}
-	b.WriteString("http://")
-	b.WriteString(d.DstAddr)
-	b.WriteString(upload.PeerDownloadHTTPPathPrefix)
-	b.Write([]byte(d.TaskID)[:3])
-	b.Write([]byte("/"))
-	b.WriteString(d.TaskID)
-	b.Write([]byte("?peerId="))
-	b.WriteString(d.DstPid)
+func (p *pieceDownloader) buildDownloadPieceHTTPRequest(ctx context.Context, d *DownloadPieceRequest) *http.Request {
+	// FIXME switch to https when tls enabled
+	targetURL := url.URL{
+		Scheme:   p.scheme,
+		Host:     d.DstAddr,
+		Path:     fmt.Sprintf("download/%s/%s", d.TaskID[:3], d.TaskID),
+		RawQuery: fmt.Sprintf("peerId=%s", d.DstPid),
+	}
 
-	u := b.String()
-	logger.Debugf("built request url: %s", u)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	logger.Debugf("built request url: %s", targetURL.String())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, targetURL.String(), nil)
 
 	// TODO use string.Builder
 	req.Header.Add("Range", fmt.Sprintf("bytes=%d-%d",
 		d.piece.RangeStart, d.piece.RangeStart+uint64(d.piece.RangeSize)-1))
+
+	// inject trace id into request header
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 	return req
 }

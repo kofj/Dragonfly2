@@ -13,9 +13,6 @@ kind-load() {
 
 main() {
     case "${1-}" in
-    cdn)
-        kind-load cdn
-        ;;
     dfdaemon)
         kind-load dfdaemon
         ;;
@@ -24,6 +21,12 @@ main() {
         ;;
     manager)
         kind-load manager
+        ;;
+    trainer)
+        kind-load trainer
+        ;;
+    no-content-length)
+        kind-load no-content-length
     esac
 }
 

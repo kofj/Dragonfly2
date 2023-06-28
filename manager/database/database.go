@@ -17,33 +17,64 @@
 package database
 
 import (
-	"context"
+	"errors"
 	"fmt"
 
 	"github.com/go-redis/redis/v8"
-	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
-	"gorm.io/gorm/schema"
-	"moul.io/zapgorm2"
 
 	logger "d7y.io/dragonfly/v2/internal/dflog"
 	"d7y.io/dragonfly/v2/manager/config"
-	"d7y.io/dragonfly/v2/manager/model"
+	"d7y.io/dragonfly/v2/manager/models"
+	"d7y.io/dragonfly/v2/manager/types"
+	pkgredis "d7y.io/dragonfly/v2/pkg/redis"
+	schedulerconfig "d7y.io/dragonfly/v2/scheduler/config"
+)
+
+const (
+	// Default name for scheduler cluster.
+	DefaultSchedulerClusterName = "scheduler-cluster-1"
+
+	// Default name for seed peer cluster.
+	DefaultSeedPeerClusterName = "seed-peer-cluster-1"
 )
 
 type Database struct {
 	DB  *gorm.DB
-	RDB *redis.Client
+	RDB redis.UniversalClient
 }
 
 func New(cfg *config.Config) (*Database, error) {
-	db, err := newMyqsl(cfg.Database.Mysql)
-	if err != nil {
-		return nil, err
+	var (
+		db  *gorm.DB
+		err error
+	)
+	switch cfg.Database.Type {
+	case config.DatabaseTypeMysql, config.DatabaseTypeMariaDB:
+		db, err = newMyqsl(cfg)
+		if err != nil {
+			logger.Errorf("mysql: %s", err.Error())
+			return nil, err
+		}
+	case config.DatabaseTypePostgres:
+		db, err = newPostgres(cfg)
+		if err != nil {
+			logger.Errorf("postgres: %s", err.Error())
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("invalid database type %s", cfg.Database.Type)
 	}
 
-	rdb, err := NewRedis(cfg.Database.Redis)
+	rdb, err := pkgredis.NewRedis(&redis.UniversalOptions{
+		Addrs:      cfg.Database.Redis.Addrs,
+		MasterName: cfg.Database.Redis.MasterName,
+		DB:         cfg.Database.Redis.DB,
+		Username:   cfg.Database.Redis.Username,
+		Password:   cfg.Database.Redis.Password,
+	})
 	if err != nil {
+		logger.Errorf("redis: %s", err.Error())
 		return nil, err
 	}
 
@@ -53,114 +84,102 @@ func New(cfg *config.Config) (*Database, error) {
 	}, nil
 }
 
-func NewRedis(cfg *config.RedisConfig) (*redis.Client, error) {
-	redis.SetLogger(&redisLogger{})
-
-	client := redis.NewClient(&redis.Options{
-		Addr:     fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		Password: cfg.Password,
-		DB:       cfg.CacheDB,
-	})
-
-	if err := client.Ping(context.Background()).Err(); err != nil {
-		return nil, err
-	}
-
-	return client, nil
-}
-
-func newMyqsl(cfg *config.MysqlConfig) (*gorm.DB, error) {
-	logger := zapgorm2.New(logger.CoreLogger.Desugar())
-
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=True&loc=Local&interpolateParams=true", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.DBName)
-	dialector := mysql.Open(dsn)
-	db, err := gorm.Open(dialector, &gorm.Config{
-		NamingStrategy: schema.NamingStrategy{
-			SingularTable: true,
-		},
-		DisableForeignKeyConstraintWhenMigrating: true,
-		Logger:                                   logger,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	// Run migration
-	if cfg.Migrate {
-		if err := migrate(db); err != nil {
-			return nil, err
-		}
-	}
-
-	// Run seed
-	if err := seed(db); err != nil {
-		return nil, err
-	}
-
-	return db, nil
-}
-
 func migrate(db *gorm.DB) error {
-	return db.Set("gorm:table_options", "DEFAULT CHARSET=utf8mb4 ROW_FORMAT=Dynamic").AutoMigrate(
-		&model.CDNCluster{},
-		&model.CDN{},
-		&model.SchedulerCluster{},
-		&model.Scheduler{},
-		&model.SecurityGroup{},
-		&model.User{},
-		&model.Oauth{},
+	return db.AutoMigrate(
+		&models.Job{},
+		&models.SeedPeerCluster{},
+		&models.SeedPeer{},
+		&models.SchedulerCluster{},
+		&models.Scheduler{},
+		&models.User{},
+		&models.Oauth{},
+		&models.Config{},
+		&models.Application{},
+		&models.Model{},
 	)
 }
 
-func seed(db *gorm.DB) error {
-	var cdnClusterCount int64
-	if err := db.Model(model.CDNCluster{}).Count(&cdnClusterCount).Error; err != nil {
+func seed(cfg *config.Config, db *gorm.DB) error {
+	// Create default scheduler cluster.
+	var schedulerClusterCount int64
+	if err := db.Model(models.SchedulerCluster{}).Count(&schedulerClusterCount).Error; err != nil {
 		return err
 	}
-	if cdnClusterCount <= 0 {
-		if err := db.Create(&model.CDNCluster{
-			Model: model.Model{
+
+	if schedulerClusterCount <= 0 {
+		if err := db.Create(&models.SchedulerCluster{
+			BaseModel: models.BaseModel{
 				ID: uint(1),
 			},
-			Name:      "cdn-cluster-1",
-			Config:    map[string]interface{}{},
+			Name: DefaultSchedulerClusterName,
+			Config: map[string]any{
+				"candidate_parent_limit": schedulerconfig.DefaultSchedulerCandidateParentLimit,
+				"filter_parent_limit":    schedulerconfig.DefaultSchedulerFilterParentLimit,
+			},
+			ClientConfig: map[string]any{
+				"load_limit":             schedulerconfig.DefaultPeerConcurrentUploadLimit,
+				"concurrent_piece_count": schedulerconfig.DefaultPeerConcurrentPieceCount,
+			},
+			Scopes:    map[string]any{},
 			IsDefault: true,
 		}).Error; err != nil {
 			return err
 		}
 	}
 
-	var schedulerClusterCount int64
-	if err := db.Model(model.SchedulerCluster{}).Count(&schedulerClusterCount).Error; err != nil {
+	// Create default seed peer cluster.
+	var seedPeerClusterCount int64
+	if err := db.Model(models.SeedPeerCluster{}).Count(&seedPeerClusterCount).Error; err != nil {
 		return err
 	}
-	if schedulerClusterCount <= 0 {
-		if err := db.Create(&model.SchedulerCluster{
-			Model: model.Model{
+
+	if seedPeerClusterCount <= 0 {
+		if err := db.Create(&models.SeedPeerCluster{
+			BaseModel: models.BaseModel{
 				ID: uint(1),
 			},
-			Name:         "scheduler-cluster-1",
-			Config:       map[string]interface{}{},
-			ClientConfig: map[string]interface{}{},
-			IsDefault:    true,
+			Name: DefaultSeedPeerClusterName,
+			Config: map[string]any{
+				"load_limit": schedulerconfig.DefaultSeedPeerConcurrentUploadLimit,
+			},
 		}).Error; err != nil {
 			return err
 		}
-	}
 
-	if schedulerClusterCount == 0 && cdnClusterCount == 0 {
-		cdnCluster := model.CDNCluster{}
-		if err := db.First(&cdnCluster).Error; err != nil {
+		seedPeerCluster := models.SeedPeerCluster{}
+		if err := db.First(&seedPeerCluster).Error; err != nil {
 			return err
 		}
 
-		schedulerCluster := model.SchedulerCluster{}
+		schedulerCluster := models.SchedulerCluster{}
 		if err := db.First(&schedulerCluster).Error; err != nil {
 			return err
 		}
 
-		if err := db.Model(&cdnCluster).Association("SchedulerClusters").Append(&schedulerCluster); err != nil {
+		if err := db.Model(&seedPeerCluster).Association("SchedulerClusters").Append(&schedulerCluster); err != nil {
 			return err
+		}
+	}
+
+	// TODO Compatible with old version.
+	// Update scheduler features when features is NULL.
+	var schedulers []models.Scheduler
+	if err := db.Model(models.Scheduler{}).Find(&schedulers).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+
+		return err
+	}
+
+	for _, scheduler := range schedulers {
+		if scheduler.Features == nil {
+			if err := db.Model(&scheduler).Update("features", models.Array(types.DefaultSchedulerFeatures)).Error; err != nil {
+				logger.Errorf("update scheduler %d features: %s", scheduler.ID, err.Error())
+				continue
+			}
+
+			logger.Infof("update scheduler %d default features", scheduler.ID)
 		}
 	}
 

@@ -18,46 +18,51 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"io"
-	"io/ioutil"
-
-	"d7y.io/dragonfly/v2/pkg/util/rangeutils"
 
 	"d7y.io/dragonfly/v2/pkg/source"
 )
 
 var data = "hello world"
 
+var (
+	buildCommit = "unknown"
+	buildTime   = "unknown"
+	vendor      = "d7y"
+)
+
 var _ source.ResourceClient = (*client)(nil)
 
 type client struct {
 }
 
-func (c *client) GetContentLength(ctx context.Context, url string, header source.RequestHeader, rang *rangeutils.Range) (int64, error) {
+func (c *client) GetContentLength(request *source.Request) (int64, error) {
 	return int64(len(data)), nil
 }
 
-func (c *client) IsSupportRange(ctx context.Context, url string, header source.RequestHeader) (bool, error) {
+func (c *client) IsSupportRange(request *source.Request) (bool, error) {
 	return false, nil
 }
 
-func (c *client) IsExpired(ctx context.Context, url string, header source.RequestHeader, expireInfo map[string]string) (bool, error) {
+func (c *client) IsExpired(request *source.Request, info *source.ExpireInfo) (bool, error) {
 	panic("implement me")
 }
 
-func (c *client) Download(ctx context.Context, url string, header source.RequestHeader, rang *rangeutils.Range) (io.ReadCloser, error) {
-	return ioutil.NopCloser(bytes.NewBufferString(data)), nil
+func (c *client) Download(request *source.Request) (*source.Response, error) {
+	return source.NewResponse(io.NopCloser(bytes.NewBufferString(data))), nil
 }
 
-func (c *client) DownloadWithResponseHeader(ctx context.Context, url string, header source.RequestHeader, rang *rangeutils.Range) (io.ReadCloser, source.ResponseHeader, error) {
-	return ioutil.NopCloser(bytes.NewBufferString(data)), map[string]string{}, nil
-}
-
-func (c *client) GetLastModifiedMillis(ctx context.Context, url string, header source.RequestHeader) (int64, error) {
+func (c *client) GetLastModified(request *source.Request) (int64, error) {
 	panic("implement me")
 }
 
-func DragonflyPluginInit(option map[string]string) (interface{}, map[string]string, error) {
-	return &client{}, map[string]string{"type": "resource", "name": "dfs", "schema": "dfs"}, nil
+func DragonflyPluginInit(option map[string]string) (any, map[string]string, error) {
+	return &client{}, map[string]string{
+		"type":        "resource",
+		"name":        "dfs",
+		"scheme":      "dfs",
+		"buildCommit": buildCommit,
+		"buildTime":   buildTime,
+		"vendor":      vendor,
+	}, nil
 }

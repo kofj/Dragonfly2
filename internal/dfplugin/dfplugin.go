@@ -21,8 +21,7 @@ import (
 	"fmt"
 	"path"
 	"plugin"
-
-	"d7y.io/dragonfly/v2/internal/dfpath"
+	"regexp"
 )
 
 const (
@@ -32,25 +31,28 @@ const (
 	// PluginInitFuncName indicates the function `DragonflyPluginInit` must be implemented in plugin
 	PluginInitFuncName = "DragonflyPluginInit"
 
-	// PluginMetaKeyType indicates the type of a plugin, currently support: resource
+	// PluginMetaKeyType indicates the type of plugin, currently support: resource
 	PluginMetaKeyType = "type"
 
 	// PluginMetaKeyName indicates the name of a plugin
 	PluginMetaKeyName = "name"
 )
 
+var PluginFormatExpr = regexp.MustCompile("d7y-(resource|manager|scheduler)-plugin-([a-z0-9]+).so")
+
 type PluginType string
 
 const (
-	PluginTypeResource = PluginType("resource")
-	PluginTypeManager  = PluginType("manager")
+	PluginTypeResource  = PluginType("resource")
+	PluginTypeManager   = PluginType("manager")
+	PluginTypeScheduler = PluginType("scheduler")
 )
 
-type PluginInitFunc func(option map[string]string) (plugin interface{}, meta map[string]string, err error)
+type PluginInitFunc func(option map[string]string) (plugin any, meta map[string]string, err error)
 
-func Load(typ PluginType, name string, option map[string]string) (interface{}, map[string]string, error) {
+func Load(dir string, typ PluginType, name string, option map[string]string) (any, map[string]string, error) {
 	soName := fmt.Sprintf(PluginFormat, string(typ), name)
-	p, err := plugin.Open(path.Join(dfpath.PluginsDir, soName))
+	p, err := plugin.Open(path.Join(dir, soName))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -61,7 +63,7 @@ func Load(typ PluginType, name string, option map[string]string) (interface{}, m
 	}
 
 	// FIXME when use symbol.(PluginInitFunc), ok is always false
-	f, ok := symbol.(func(option map[string]string) (plugin interface{}, meta map[string]string, err error))
+	f, ok := symbol.(func(option map[string]string) (plugin any, meta map[string]string, err error))
 	if !ok {
 		return nil, nil, errors.New("invalid plugin init function signature")
 	}

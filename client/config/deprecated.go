@@ -17,10 +17,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"strings"
-
-	"github.com/pkg/errors"
 )
 
 var DefaultSupernodesValue = &SupernodesValue{
@@ -36,9 +35,7 @@ type SupernodesValue struct {
 // String implements the pflag.Value interface.
 func (sv *SupernodesValue) String() string {
 	var result []string
-	for _, v := range sv.Nodes {
-		result = append(result, v)
-	}
+	result = append(result, sv.Nodes...)
 	return strings.Join(result, ",")
 }
 

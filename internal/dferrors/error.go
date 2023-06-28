@@ -17,15 +17,18 @@
 package dferrors
 
 import (
+	"errors"
 	"fmt"
 
-	"d7y.io/dragonfly/v2/pkg/rpc/base"
-	"github.com/pkg/errors"
+	"google.golang.org/grpc/status"
+
+	commonv1 "d7y.io/api/pkg/apis/common/v1"
 )
 
 // common and framework errors
 var (
 	ErrInvalidArgument = errors.New("invalid argument")
+	ErrInvalidHeader   = errors.New("invalid Header")
 	ErrDataNotFound    = errors.New("data not found")
 	ErrEmptyValue      = errors.New("empty value")
 	ErrConvertFailed   = errors.New("convert failed")
@@ -38,7 +41,7 @@ func IsEndOfStream(err error) bool {
 }
 
 type DfError struct {
-	Code    base.Code
+	Code    commonv1.Code
 	Message string
 }
 
@@ -46,21 +49,21 @@ func (s *DfError) Error() string {
 	return fmt.Sprintf("[%d]%s", s.Code, s.Message)
 }
 
-func New(code base.Code, msg string) *DfError {
+func New(code commonv1.Code, msg string) *DfError {
 	return &DfError{
 		Code:    code,
 		Message: msg,
 	}
 }
 
-func Newf(code base.Code, format string, a ...interface{}) *DfError {
+func Newf(code commonv1.Code, format string, a ...any) *DfError {
 	return &DfError{
 		Code:    code,
 		Message: fmt.Sprintf(format, a...),
 	}
 }
 
-func CheckError(err error, code base.Code) bool {
+func CheckError(err error, code commonv1.Code) bool {
 	if err == nil {
 		return false
 	}
@@ -68,4 +71,34 @@ func CheckError(err error, code base.Code) bool {
 	e, ok := err.(*DfError)
 
 	return ok && e.Code == code
+}
+
+// ConvertGRPCErrorToDfError converts grpc error to DfError, if it exists.
+func ConvertGRPCErrorToDfError(err error) error {
+	for _, d := range status.Convert(err).Details() {
+		switch internal := d.(type) {
+		case *commonv1.GrpcDfError:
+			return &DfError{
+				Code:    internal.Code,
+				Message: internal.Message,
+			}
+		}
+	}
+
+	return err
+}
+
+// ConvertDfErrorToGRPCError converts DfError to grpc error, if it is.
+func ConvertDfErrorToGRPCError(err error) error {
+	if v, ok := err.(*DfError); ok {
+		s, e := status.Convert(err).WithDetails(
+			&commonv1.GrpcDfError{
+				Code:    v.Code,
+				Message: v.Message,
+			})
+		if e == nil {
+			err = s.Err()
+		}
+	}
+	return err
 }

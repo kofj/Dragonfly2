@@ -17,30 +17,36 @@
 package middlewares
 
 import (
+	"context"
 	"net/http"
 	"time"
 
-	"d7y.io/dragonfly/v2/manager/model"
-	"d7y.io/dragonfly/v2/manager/service"
-	"d7y.io/dragonfly/v2/manager/types"
 	jwt "github.com/appleboy/gin-jwt/v2"
 	"github.com/gin-gonic/gin"
+
+	"d7y.io/dragonfly/v2/manager/config"
+	"d7y.io/dragonfly/v2/manager/models"
+	"d7y.io/dragonfly/v2/manager/service"
+	"d7y.io/dragonfly/v2/manager/types"
 )
 
-func Jwt(service service.REST) (*jwt.GinJWTMiddleware, error) {
-	identityKey := "id"
+const (
+	// defaultIdentityKey is default of the identity key.
+	defaultIdentityKey = "id"
+)
 
+func Jwt(cfg config.JWTConfig, service service.Service) (*jwt.GinJWTMiddleware, error) {
 	authMiddleware, err := jwt.New(&jwt.GinJWTMiddleware{
-		Realm:       "Dragonfly",
-		Key:         []byte("Secret Key"),
-		Timeout:     2 * 24 * time.Hour,
-		MaxRefresh:  2 * 24 * time.Hour,
-		IdentityKey: identityKey,
+		Realm:       cfg.Realm,
+		Key:         []byte(cfg.Key),
+		Timeout:     cfg.Timeout,
+		MaxRefresh:  cfg.MaxRefresh,
+		IdentityKey: defaultIdentityKey,
 
-		IdentityHandler: func(c *gin.Context) interface{} {
+		IdentityHandler: func(c *gin.Context) any {
 			claims := jwt.ExtractClaims(c)
 
-			id, ok := claims[identityKey]
+			id, ok := claims[defaultIdentityKey]
 			if !ok {
 				c.JSON(http.StatusUnauthorized, gin.H{
 					"message": "Unavailable token: require user id",
@@ -53,10 +59,10 @@ func Jwt(service service.REST) (*jwt.GinJWTMiddleware, error) {
 			return id
 		},
 
-		Authenticator: func(c *gin.Context) (interface{}, error) {
+		Authenticator: func(c *gin.Context) (any, error) {
 			// Oauth2 signin
 			if rawUser, ok := c.Get("user"); ok {
-				user, ok := rawUser.(*model.User)
+				user, ok := rawUser.(*models.User)
 				if !ok {
 					return "", jwt.ErrFailedAuthentication
 				}
@@ -69,7 +75,7 @@ func Jwt(service service.REST) (*jwt.GinJWTMiddleware, error) {
 				return "", jwt.ErrMissingLoginValues
 			}
 
-			user, err := service.SignIn(json)
+			user, err := service.SignIn(context.TODO(), json)
 			if err != nil {
 				return "", jwt.ErrFailedAuthentication
 			}
@@ -77,10 +83,10 @@ func Jwt(service service.REST) (*jwt.GinJWTMiddleware, error) {
 			return user, nil
 		},
 
-		PayloadFunc: func(data interface{}) jwt.MapClaims {
-			if user, ok := data.(*model.User); ok {
+		PayloadFunc: func(data any) jwt.MapClaims {
+			if user, ok := data.(*models.User); ok {
 				return jwt.MapClaims{
-					identityKey: user.ID,
+					defaultIdentityKey: user.ID,
 				}
 			}
 
@@ -124,7 +130,6 @@ func Jwt(service service.REST) (*jwt.GinJWTMiddleware, error) {
 		SendCookie:     true,
 		CookieHTTPOnly: false,
 	})
-
 	if err != nil {
 		return nil, err
 	}

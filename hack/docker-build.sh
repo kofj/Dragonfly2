@@ -10,11 +10,15 @@ cd "${curDir}/../" || return
 D7Y_VERSION=${D7Y_VERSION:-"latest"}
 D7Y_REGISTRY=${D7Y_REGISTRY:-d7yio}
 IMAGES_DIR="build/images"
-BASE_IMAGE=${BASE_IMAGE:-alpine:3.12}
+BASE_IMAGE=${BASE_IMAGE:-alpine:3.16}
 
+CGO_ENABLED=${CGO_ENABLED:-0}
 GOPROXY=${GOPROXY:-`go env GOPROXY`}
 GOTAGS=${GOTAGS:-}
 GOGCFLAGS=${GOGCFLAGS:-}
+
+GOOS=${GOOS:-linux}
+GOARCH=${GOARCH:-amd64}
 
 # enable bash debug output
 DEBUG=${DEBUG:-}
@@ -26,6 +30,8 @@ fi
 docker-build() {
     name=$1
     docker build \
+      --platform ${GOOS}/${GOARCH} \
+      --build-arg CGO_ENABLED="${CGO_ENABLED}" \
       --build-arg GOPROXY="${GOPROXY}" \
       --build-arg GOTAGS="${GOTAGS}" \
       --build-arg GOGCFLAGS="${GOGCFLAGS}" \
@@ -39,12 +45,7 @@ git-submodule() {
 }
 
 main() {
-    git-submodule
-
     case "${1-}" in
-    cdn)
-        docker-build cdn
-        ;;
     dfdaemon)
         docker-build dfdaemon
         ;;
@@ -52,7 +53,11 @@ main() {
         docker-build scheduler
         ;;
     manager)
+        git-submodule
         docker-build manager
+        ;;
+    trainer)
+        docker-build trainer
     esac
 }
 

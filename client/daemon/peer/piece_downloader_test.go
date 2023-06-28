@@ -21,27 +21,34 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/go-http-utils/headers"
 	testifyassert "github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	"d7y.io/dragonfly/v2/client/clientutil"
+	commonv1 "d7y.io/api/pkg/apis/common/v1"
+
 	"d7y.io/dragonfly/v2/client/daemon/test"
-	"d7y.io/dragonfly/v2/client/daemon/upload"
-	"d7y.io/dragonfly/v2/pkg/rpc/base"
-	_ "d7y.io/dragonfly/v2/pkg/rpc/dfdaemon/server"
+	logger "d7y.io/dragonfly/v2/internal/dflog"
+	nethttp "d7y.io/dragonfly/v2/pkg/net/http"
+	"d7y.io/dragonfly/v2/pkg/source"
+	"d7y.io/dragonfly/v2/pkg/source/clients/httpprotocol"
 )
 
 func TestPieceDownloader_DownloadPiece(t *testing.T) {
 	assert := testifyassert.New(t)
-	testData, err := ioutil.ReadFile(test.File)
+	source.UnRegister("http")
+	require.Nil(t, source.Register("http", httpprotocol.NewHTTPSourceClient(), httpprotocol.Adapter))
+	defer source.UnRegister("http")
+	testData, err := os.ReadFile(test.File)
 	assert.Nil(err, "load test file")
 	pieceDownloadTimeout := 30 * time.Second
 
@@ -50,15 +57,17 @@ func TestPieceDownloader_DownloadPiece(t *testing.T) {
 		taskID          string
 		pieceRange      string
 		rangeStart      uint64
-		rangeSize       int32
+		rangeSize       uint32
 		targetPieceData []byte
 	}{
 		{
 			handleFunc: func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(upload.PeerDownloadHTTPPathPrefix+"tas/"+"task-0", r.URL.Path)
+				assert.Equal("/download/tas/task-0", r.URL.Path)
 				data := []byte("test test ")
 				w.Header().Set(headers.ContentLength, fmt.Sprintf("%d", len(data)))
-				w.Write(data)
+				if _, err := w.Write(data); err != nil {
+					t.Error(err)
+				}
 			},
 			taskID:          "task-0",
 			pieceRange:      "bytes=0-9",
@@ -68,10 +77,12 @@ func TestPieceDownloader_DownloadPiece(t *testing.T) {
 		},
 		{
 			handleFunc: func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(upload.PeerDownloadHTTPPathPrefix+"tas/"+"task-1", r.URL.Path)
-				rg := clientutil.MustParseRange(r.Header.Get("Range"), math.MaxInt64)
+				assert.Equal("/download/tas/task-1", r.URL.Path)
+				rg := nethttp.MustParseRange(r.Header.Get("Range"), math.MaxInt64)
 				w.Header().Set(headers.ContentLength, fmt.Sprintf("%d", rg.Length))
-				w.Write(testData[rg.Start : rg.Start+rg.Length])
+				if _, err := w.Write(testData[rg.Start : rg.Start+rg.Length]); err != nil {
+					t.Error(err)
+				}
 			},
 			taskID:          "task-1",
 			pieceRange:      "bytes=0-99",
@@ -81,23 +92,27 @@ func TestPieceDownloader_DownloadPiece(t *testing.T) {
 		},
 		{
 			handleFunc: func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(upload.PeerDownloadHTTPPathPrefix+"tas/"+"task-2", r.URL.Path)
-				rg := clientutil.MustParseRange(r.Header.Get("Range"), math.MaxInt64)
+				assert.Equal("/download/tas/task-2", r.URL.Path)
+				rg := nethttp.MustParseRange(r.Header.Get("Range"), math.MaxInt64)
 				w.Header().Set(headers.ContentLength, fmt.Sprintf("%d", rg.Length))
-				w.Write(testData[rg.Start : rg.Start+rg.Length])
+				if _, err := w.Write(testData[rg.Start : rg.Start+rg.Length]); err != nil {
+					t.Error(err)
+				}
 			},
 			taskID:          "task-2",
 			pieceRange:      fmt.Sprintf("bytes=512-%d", len(testData)-1),
 			rangeStart:      512,
-			rangeSize:       int32(len(testData) - 512),
+			rangeSize:       uint32(len(testData) - 512),
 			targetPieceData: testData[512:],
 		},
 		{
 			handleFunc: func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(upload.PeerDownloadHTTPPathPrefix+"tas/"+"task-3", r.URL.Path)
-				rg := clientutil.MustParseRange(r.Header.Get("Range"), math.MaxInt64)
+				assert.Equal("/download/tas/task-3", r.URL.Path)
+				rg := nethttp.MustParseRange(r.Header.Get("Range"), math.MaxInt64)
 				w.Header().Set(headers.ContentLength, fmt.Sprintf("%d", rg.Length))
-				w.Write(testData[rg.Start : rg.Start+rg.Length])
+				if _, err := w.Write(testData[rg.Start : rg.Start+rg.Length]); err != nil {
+					t.Error(err)
+				}
 			},
 			taskID:          "task-3",
 			pieceRange:      "bytes=512-1024",
@@ -110,39 +125,32 @@ func TestPieceDownloader_DownloadPiece(t *testing.T) {
 	for _, tt := range tests {
 		server := httptest.NewServer(http.HandlerFunc(tt.handleFunc))
 		addr, _ := url.Parse(server.URL)
-		factories := []func() (PieceDownloader, error){
-			func() (PieceDownloader, error) {
-				return NewPieceDownloader(pieceDownloadTimeout)
-			}, func() (PieceDownloader, error) {
-				return NewOptimizedPieceDownloader()
-			}}
-		for _, factory := range factories {
-			pd, _ := factory()
-			hash := md5.New()
-			hash.Write(tt.targetPieceData)
-			digest := hex.EncodeToString(hash.Sum(nil)[:16])
-			r, c, err := pd.DownloadPiece(context.Background(), &DownloadPieceRequest{
-				TaskID:     tt.taskID,
-				DstPid:     "",
-				DstAddr:    addr.Host,
-				CalcDigest: true,
-				piece: &base.PieceInfo{
-					PieceNum:    0,
-					RangeStart:  tt.rangeStart,
-					RangeSize:   tt.rangeSize,
-					PieceMd5:    digest,
-					PieceOffset: tt.rangeStart,
-					PieceStyle:  base.PieceStyle_PLAIN,
-				},
-			})
-			assert.Nil(err, "downloaded piece should success")
+		pd := NewPieceDownloader(pieceDownloadTimeout, nil)
+		hash := md5.New()
+		hash.Write(tt.targetPieceData)
+		digest := hex.EncodeToString(hash.Sum(nil)[:16])
+		r, c, err := pd.DownloadPiece(context.Background(), &DownloadPieceRequest{
+			TaskID:     tt.taskID,
+			DstPid:     "",
+			DstAddr:    addr.Host,
+			CalcDigest: true,
+			piece: &commonv1.PieceInfo{
+				PieceNum:    0,
+				RangeStart:  tt.rangeStart,
+				RangeSize:   tt.rangeSize,
+				PieceMd5:    digest,
+				PieceOffset: tt.rangeStart,
+				PieceStyle:  commonv1.PieceStyle_PLAIN,
+			},
+			log: logger.With("test", "test"),
+		})
+		assert.Nil(err, "downloaded piece should success")
 
-			data, err := ioutil.ReadAll(r)
-			assert.Nil(err, "read piece data should success")
-			c.Close()
+		data, err := io.ReadAll(r)
+		assert.Nil(err, "read piece data should success")
+		c.Close()
 
-			assert.Equal(data, tt.targetPieceData, "downloaded piece data should match")
-		}
+		assert.Equal(data, tt.targetPieceData, "downloaded piece data should match")
 		server.Close()
 	}
 }

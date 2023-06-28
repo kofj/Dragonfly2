@@ -17,332 +17,377 @@
 package searcher
 
 import (
+	"context"
 	"testing"
 
-	"d7y.io/dragonfly/v2/manager/model"
 	"github.com/stretchr/testify/assert"
+
+	logger "d7y.io/dragonfly/v2/internal/dflog"
+	"d7y.io/dragonfly/v2/manager/models"
 )
 
-func TestSchedulerCluster(t *testing.T) {
+func TestSearcher_FindSchedulerClusters(t *testing.T) {
+	pluginDir := "."
 	tests := []struct {
 		name              string
-		schedulerClusters []model.SchedulerCluster
+		schedulerClusters []models.SchedulerCluster
 		conditions        map[string]string
-		expect            func(t *testing.T, data model.SchedulerCluster, ok bool)
+		expect            func(t *testing.T, data []models.SchedulerCluster, err error)
 	}{
 		{
-			name:              "conditions is empty",
-			schedulerClusters: []model.SchedulerCluster{{Name: "foo"}},
-			conditions:        map[string]string{},
-			expect: func(t *testing.T, data model.SchedulerCluster, ok bool) {
-				assert := assert.New(t)
-				assert.Equal(ok, false)
-			},
-		},
-		{
 			name:              "scheduler clusters is empty",
-			schedulerClusters: []model.SchedulerCluster{},
+			schedulerClusters: []models.SchedulerCluster{},
 			conditions:        map[string]string{"location": "foo"},
-			expect: func(t *testing.T, data model.SchedulerCluster, ok bool) {
+			expect: func(t *testing.T, data []models.SchedulerCluster, err error) {
 				assert := assert.New(t)
-				assert.Equal(ok, false)
+				assert.EqualError(err, "empty scheduler clusters")
 			},
 		},
 		{
-			name: "match according to security_domain condition",
-			schedulerClusters: []model.SchedulerCluster{
+			name: "scheduler clusters have default cluster",
+			schedulerClusters: []models.SchedulerCluster{
 				{
 					Name: "foo",
-					SecurityGroup: model.SecurityGroup{
-						Domain: "domain-1",
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "foo",
+							State:    "active",
+						},
 					},
 				},
 				{
 					Name: "bar",
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "bar",
+							State:    "active",
+						},
+					},
+					IsDefault: true,
 				},
 			},
-			conditions: map[string]string{"security_domain": "domain-1"},
-			expect: func(t *testing.T, data model.SchedulerCluster, ok bool) {
+			conditions: map[string]string{},
+			expect: func(t *testing.T, data []models.SchedulerCluster, err error) {
 				assert := assert.New(t)
-				assert.Equal(data.Name, "foo")
-				assert.Equal(ok, true)
+				assert.Equal(data[0].Name, "bar")
+				assert.Equal(data[1].Name, "foo")
+				assert.Equal(len(data), 2)
 			},
 		},
 		{
 			name: "match according to location condition",
-			schedulerClusters: []model.SchedulerCluster{
+			schedulerClusters: []models.SchedulerCluster{
 				{
 					Name: "foo",
-					Scopes: map[string]interface{}{
-						"location": []string{"location-1"},
+					Scopes: map[string]any{
+						"location": "location-1",
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "foo",
+							State:    "active",
+						},
 					},
 				},
 				{
 					Name: "bar",
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "bar",
+							State:    "active",
+						},
+					},
 				},
 			},
 			conditions: map[string]string{"location": "location-1"},
-			expect: func(t *testing.T, data model.SchedulerCluster, ok bool) {
+			expect: func(t *testing.T, data []models.SchedulerCluster, err error) {
 				assert := assert.New(t)
-				assert.Equal(data.Name, "foo")
-				assert.Equal(ok, true)
+				assert.Equal(data[0].Name, "foo")
+				assert.Equal(data[1].Name, "bar")
 			},
 		},
 		{
 			name: "match according to idc condition",
-			schedulerClusters: []model.SchedulerCluster{
+			schedulerClusters: []models.SchedulerCluster{
 				{
 					Name: "foo",
-					Scopes: map[string]interface{}{
-						"idc": []string{"idc-1"},
+					Scopes: map[string]any{
+						"idc": "idc|idc-1",
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "foo",
+							State:    "active",
+						},
 					},
 				},
 				{
 					Name: "bar",
+					Scopes: map[string]any{
+						"idc": "idc-2|idc-3",
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "bar",
+							State:    "active",
+						},
+					},
 				},
 			},
-			conditions: map[string]string{"idc": "idc-1"},
-			expect: func(t *testing.T, data model.SchedulerCluster, ok bool) {
+			conditions: map[string]string{"idc": "idc-2"},
+			expect: func(t *testing.T, data []models.SchedulerCluster, err error) {
 				assert := assert.New(t)
-				assert.Equal(data.Name, "foo")
-				assert.Equal(ok, true)
+				assert.Equal(data[0].Name, "bar")
+				assert.Equal(data[1].Name, "foo")
+				assert.Equal(len(data), 2)
 			},
 		},
 		{
-			name: "match according to location and idc condition",
-			schedulerClusters: []model.SchedulerCluster{
+			name: "match according to cidr condition",
+			schedulerClusters: []models.SchedulerCluster{
 				{
 					Name: "foo",
-					Scopes: map[string]interface{}{
-						"location": []string{"location-1"},
-						"idc":      []string{"idc-1"},
+					Scopes: map[string]any{
+						"cidrs": []string{"128.168.1.0/24"},
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "foo",
+							State:    "active",
+						},
 					},
 				},
 				{
-					Name: "bar",
-				},
-			},
-			conditions: map[string]string{
-				"location": "location-1",
-				"idc":      "idc-1",
-			},
-			expect: func(t *testing.T, data model.SchedulerCluster, ok bool) {
-				assert := assert.New(t)
-				assert.Equal(data.Name, "foo")
-				assert.Equal(ok, true)
-			},
-		},
-		{
-			name: "match according to security_domain and location conditions",
-			schedulerClusters: []model.SchedulerCluster{
-				{
-					Name: "foo",
-					Scopes: map[string]interface{}{
-						"location": []string{"location-1"},
-					},
-					SecurityGroup: model.SecurityGroup{
-						Domain: "domain-1",
+					Name:   "bar",
+					Scopes: map[string]any{},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "bar",
+							State:    "active",
+						},
 					},
 				},
-				{
-					Name: "bar",
-				},
 			},
-			conditions: map[string]string{
-				"security_domain": "domain-1",
-				"location":        "location-1",
-			},
-			expect: func(t *testing.T, data model.SchedulerCluster, ok bool) {
-				assert := assert.New(t)
-				assert.Equal(data.Name, "foo")
-				assert.Equal(ok, true)
-			},
-		},
-		{
-			name: "match according to security_domain and idc conditions",
-			schedulerClusters: []model.SchedulerCluster{
-				{
-					Name: "foo",
-					Scopes: map[string]interface{}{
-						"idc": []string{"idc-1"},
-					},
-					SecurityGroup: model.SecurityGroup{
-						Domain: "domain-1",
-					},
-				},
-				{
-					Name: "bar",
-				},
-			},
-			conditions: map[string]string{
-				"security_domain": "domain-1",
-				"idc":             "idc-1",
-			},
-			expect: func(t *testing.T, data model.SchedulerCluster, ok bool) {
-				assert := assert.New(t)
-				assert.Equal(data.Name, "foo")
-				assert.Equal(ok, true)
-			},
-		},
-		{
-			name: "match according to all conditions",
-			schedulerClusters: []model.SchedulerCluster{
-				{
-					Name: "foo",
-					Scopes: map[string]interface{}{
-						"idc":      []string{"idc-1"},
-						"location": []string{"location-1"},
-					},
-					SecurityGroup: model.SecurityGroup{
-						Domain: "domain-1",
-					},
-				},
-				{
-					Name: "bar",
-				},
-			},
-			conditions: map[string]string{
-				"security_domain": "domain-1",
-				"idc":             "idc-1",
-				"location":        "location-1",
-			},
-			expect: func(t *testing.T, data model.SchedulerCluster, ok bool) {
-				assert := assert.New(t)
-				assert.Equal(data.Name, "foo")
-				assert.Equal(ok, true)
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			searcher := New()
-			clusters, ok := searcher.FindSchedulerCluster(tc.schedulerClusters, tc.conditions)
-			tc.expect(t, clusters, ok)
-		})
-	}
-}
-
-func TestCalculateSchedulerClusterMean(t *testing.T) {
-	tests := []struct {
-		name       string
-		conditions map[string]string
-		rawScopes  map[string]interface{}
-		expect     func(t *testing.T, mean float64)
-	}{
-		{
-			name:       "conditions and rawScopes is empty",
 			conditions: map[string]string{},
-			rawScopes:  map[string]interface{}{},
-			expect: func(t *testing.T, mean float64) {
+			expect: func(t *testing.T, data []models.SchedulerCluster, err error) {
 				assert := assert.New(t)
-				assert.Equal(mean, float64(0))
+				assert.Equal(data[0].Name, "foo")
+				assert.Equal(data[1].Name, "bar")
+				assert.Equal(len(data), 2)
 			},
 		},
 		{
-			name: "missed matches",
+			name: "match according to idc and location conditions",
+			schedulerClusters: []models.SchedulerCluster{
+				{
+					Name: "foo",
+					Scopes: map[string]any{
+						"idc":      "idc-3",
+						"location": "location-1",
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "foo",
+							State:    "active",
+						},
+					},
+				},
+				{
+					Name: "bar",
+					Scopes: map[string]any{
+						"idc":      "idc-1",
+						"location": "location-3",
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "bar",
+							State:    "active",
+						},
+					},
+				},
+				{
+					Name: "baz",
+					Scopes: map[string]any{
+						"idc":      "idc-1",
+						"location": "location-1|location-2",
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "baz",
+							State:    "active",
+						},
+					},
+				},
+				{
+					Name: "bax",
+					Scopes: map[string]any{
+						"idc":      "idc-3",
+						"location": "location-3",
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "bax",
+							State:    "active",
+						},
+					},
+					IsDefault: true,
+				},
+				{
+					Name: "bac",
+					Scopes: map[string]any{
+						"idc":      "idc-1",
+						"location": "location-2",
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "bac",
+							State:    "active",
+						},
+					},
+				},
+			},
 			conditions: map[string]string{
-				"location": "location-1",
-			},
-			rawScopes: map[string]interface{}{
-				"idc": []string{"idc-1"},
-			},
-			expect: func(t *testing.T, mean float64) {
-				assert := assert.New(t)
-				assert.Equal(mean, float64(0))
-			},
-		},
-		{
-			name: "match according to location",
-			conditions: map[string]string{
-				"location": "location-1",
-			},
-			rawScopes: map[string]interface{}{
-				"location": []string{"location-1"},
-			},
-			expect: func(t *testing.T, mean float64) {
-				assert := assert.New(t)
-				assert.Equal(mean, float64(conditionLocationWeight))
-			},
-		},
-		{
-			name: "match according to idc",
-			conditions: map[string]string{
-				"idc": "idc-1",
-			},
-			rawScopes: map[string]interface{}{
-				"idc": []string{"idc-1"},
-			},
-			expect: func(t *testing.T, mean float64) {
-				assert := assert.New(t)
-				assert.Equal(mean, float64(conditionIDCWeight))
-			},
-		},
-		{
-			name: "match according to location and idc",
-			conditions: map[string]string{
-				"location": "location-1",
 				"idc":      "idc-1",
+				"location": "location-1|location-2",
 			},
-			rawScopes: map[string]interface{}{
-				"location": []string{"location-1"},
-				"idc":      []string{"idc-1"},
-			},
-			expect: func(t *testing.T, mean float64) {
+			expect: func(t *testing.T, data []models.SchedulerCluster, err error) {
 				assert := assert.New(t)
-				assert.Equal(mean, float64(conditionLocationWeight+conditionIDCWeight))
+				assert.Equal(data[0].Name, "baz")
+				assert.Equal(data[1].Name, "bar")
+				assert.Equal(data[2].Name, "bac")
+				assert.Equal(data[3].Name, "foo")
+				assert.Equal(data[4].Name, "bax")
+				assert.Equal(len(data), 5)
+			},
+		},
+		{
+			name: "match according to all conditions with the case insensitive",
+			schedulerClusters: []models.SchedulerCluster{
+				{
+					Name: "foo",
+					Scopes: map[string]any{
+						"idc":      "IDC-1",
+						"location": "LOCATION-2",
+						"cidrs":    []string{"128.168.1.0/24"},
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "foo",
+							State:    "active",
+						},
+					},
+				},
+				{
+					Name: "bar",
+					Scopes: map[string]any{
+						"idc":      "IDC-1",
+						"location": "LOCATION-1",
+						"cidrs":    []string{"128.168.1.0/24"},
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "bar",
+							State:    "active",
+						},
+					},
+				},
+				{
+					Name: "baz",
+					Scopes: map[string]any{
+						"idc":      "IDC-1",
+						"location": "LOCATION-1|LOCATION-2",
+						"cidrs":    []string{"128.168.1.0/24"},
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "baz",
+							State:    "active",
+						},
+					},
+				},
+				{
+					Name: "bax",
+					Scopes: map[string]any{
+						"idc":      "IDC-1",
+						"location": "LOCATION-2",
+						"cidrs":    []string{"128.168.1.0/24"},
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "bax",
+							State:    "active",
+						},
+					},
+					IsDefault: true,
+				},
+				{
+					Name: "bac",
+					Scopes: map[string]any{
+						"idc":      "IDC-1",
+						"location": "LOCATION-2",
+						"cidrs":    []string{"128.168.1.0/24"},
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "bac",
+							State:    "active",
+						},
+					},
+				},
+				{
+					Name: "bae",
+					Scopes: map[string]any{
+						"idc":      "IDC-1",
+						"location": "LOCATION-2",
+						"cidrs":    []string{"128.168.1.0/24"},
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "bae",
+							State:    "active",
+						},
+					},
+					IsDefault: true,
+				},
+				{
+					Name: "bat",
+					Scopes: map[string]any{
+						"idc":      "IDC-1",
+						"location": "LOCATION-2",
+						"cidrs":    []string{"192.168.1.0/24"},
+					},
+					Schedulers: []models.Scheduler{
+						{
+							Hostname: "bae",
+							State:    "active",
+						},
+					},
+					IsDefault: true,
+				},
+			},
+			conditions: map[string]string{
+				"idc":      "idc-1",
+				"location": "location-1|location-2",
+			},
+			expect: func(t *testing.T, data []models.SchedulerCluster, err error) {
+				assert := assert.New(t)
+				assert.Equal(data[0].Name, "bax")
+				assert.Equal(data[1].Name, "bae")
+				assert.Equal(data[2].Name, "foo")
+				assert.Equal(data[3].Name, "bar")
+				assert.Equal(data[4].Name, "baz")
+				assert.Equal(data[5].Name, "bac")
+				assert.Equal(data[6].Name, "bat")
+				assert.Equal(len(data), 7)
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			mean := calculateSchedulerClusterMean(tc.conditions, tc.rawScopes)
-			tc.expect(t, mean)
-		})
-	}
-}
-
-func TestCalculateConditionScore(t *testing.T) {
-	tests := []struct {
-		name   string
-		value  string
-		scope  []string
-		expect func(t *testing.T, score float64)
-	}{
-		{
-			name:  "value is empty",
-			value: "",
-			scope: []string{"foo"},
-			expect: func(t *testing.T, score float64) {
-				assert := assert.New(t)
-				assert.Equal(score, float64(0))
-			},
-		},
-		{
-			name:  "scope is empty",
-			value: "foo",
-			scope: []string{},
-			expect: func(t *testing.T, score float64) {
-				assert := assert.New(t)
-				assert.Equal(score, float64(0))
-			},
-		},
-		{
-			name:  "match according to value",
-			value: "foo",
-			scope: []string{"foo"},
-			expect: func(t *testing.T, score float64) {
-				assert := assert.New(t)
-				assert.Equal(score, float64(1))
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			score := calculateConditionScore(tc.value, tc.scope)
-			tc.expect(t, score)
+			searcher := New(pluginDir)
+			clusters, found := searcher.FindSchedulerClusters(context.Background(), tc.schedulerClusters, "128.168.1.0", "foo", tc.conditions, logger.CoreLogger)
+			tc.expect(t, clusters, found)
 		})
 	}
 }

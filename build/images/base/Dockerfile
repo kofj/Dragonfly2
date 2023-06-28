@@ -3,7 +3,7 @@ FROM quay.io/iovisor/bpftrace:v0.13.0
 ENV DEBIAN_FRONTEND noninteractive
 
 RUN apt-get update \
-    && apt-get install -y binutils bpfcc-tools curl git iproute2 iputils-ping jq socat tree vim wget \
+    && apt-get install -y binutils bpfcc-tools curl dnsutils git iproute2 iputils-ping jq netcat socat tree vim wget \
     && apt-get install -y openssh-client openssh-server \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /run/sshd
@@ -11,9 +11,9 @@ RUN apt-get update \
 ENV PATH=/go/bin:/usr/local/go/bin:$PATH
 
 ENV GOPATH=/go
-ENV GOLANG_VERSION 1.16.6
-ENV GOLANG_DOWNLOAD_URL https://golang.org/dl/go$GOLANG_VERSION.linux-amd64.tar.gz
-ENV GOLANG_DOWNLOAD_SHA256 be333ef18b3016e9d7cb7b1ff1fdb0cac800ca0be4cf2290fe613b3d069dfe0d
+ENV GOLANG_VERSION 1.20.1
+ENV GOLANG_DOWNLOAD_URL https://go.dev/dl/go1.20.1.linux-amd64.tar.gz
+ENV GOLANG_DOWNLOAD_SHA256 000a5b1fca4f75895f78befeb2eecf10bfff3c428597f3f1e69133b63b911b02
 
 ARG GOPROXY
 

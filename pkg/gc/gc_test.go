@@ -22,19 +22,18 @@ import (
 	"testing"
 	"time"
 
-	"d7y.io/dragonfly/v2/pkg/gc/mocks"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestGCAdd(t *testing.T) {
+func TestGC_Add(t *testing.T) {
 	tests := []struct {
 		name   string
 		task   Task
 		expect func(t *testing.T, err error)
 	}{
 		{
-			name: "new GC instance succeeded",
+			name: "new GC",
 			task: Task{
 				ID:       "gc",
 				Interval: 2 * time.Second,
@@ -86,8 +85,8 @@ func TestGCAdd(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := gomock.NewController(t)
-			mockLogger := mocks.NewMockLogger(ctl)
-			mockRunner := mocks.NewMockRunner(ctl)
+			mockLogger := NewMockLogger(ctl)
+			mockRunner := NewMockRunner(ctl)
 
 			gc := New(WithLogger(mockLogger))
 
@@ -101,31 +100,33 @@ func TestGCAdd(t *testing.T) {
 	}
 }
 
-func TestGCRun(t *testing.T) {
+func TestGC_Run(t *testing.T) {
 	tests := []struct {
 		name string
 		task Task
-		run  func(gc GC, id string, ml *mocks.MockLogger, mr *mocks.MockRunner, t *testing.T)
+		run  func(gc GC, id string, ml *MockLogger, mr *MockRunner, t *testing.T)
 	}{
 		{
-			name: "run task succeeded",
+			name: "run task",
 			task: Task{
 				ID:       "foo",
 				Interval: 2 * time.Hour,
 				Timeout:  1 * time.Hour,
 			},
-			run: func(gc GC, id string, ml *mocks.MockLogger, mr *mocks.MockRunner, t *testing.T) {
+			run: func(gc GC, id string, ml *MockLogger, mr *MockRunner, t *testing.T) {
 				var wg sync.WaitGroup
 				wg.Add(3)
 				defer wg.Wait()
 
 				gomock.InOrder(
-					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template interface{}, args ...interface{}) { wg.Done() }).Times(1),
+					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template any, args ...any) { wg.Done() }).Times(1),
 					mr.EXPECT().RunGC().Do(func() { wg.Done() }).Return(nil).Times(1),
-					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template interface{}, args ...interface{}) { wg.Done() }).Times(1),
+					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template any, args ...any) { wg.Done() }).Times(1),
 				)
 
-				gc.Run(id)
+				if err := gc.Run(id); err != nil {
+					t.Error(err)
+				}
 			},
 		},
 		{
@@ -135,20 +136,22 @@ func TestGCRun(t *testing.T) {
 				Interval: 2 * time.Hour,
 				Timeout:  1 * time.Hour,
 			},
-			run: func(gc GC, id string, ml *mocks.MockLogger, mr *mocks.MockRunner, t *testing.T) {
+			run: func(gc GC, id string, ml *MockLogger, mr *MockRunner, t *testing.T) {
 				var wg sync.WaitGroup
 				wg.Add(4)
 				defer wg.Wait()
 
 				err := errors.New("bar")
 				gomock.InOrder(
-					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template interface{}, args ...interface{}) { wg.Done() }).Times(1),
+					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template any, args ...any) { wg.Done() }).Times(1),
 					mr.EXPECT().RunGC().Do(func() { wg.Done() }).Return(err).Times(1),
-					ml.EXPECT().Errorf(gomock.Any(), gomock.Eq("foo"), gomock.Eq(err)).Do(func(template interface{}, args ...interface{}) { wg.Done() }).Times(1),
-					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template interface{}, args ...interface{}) { wg.Done() }).Times(1),
+					ml.EXPECT().Errorf(gomock.Any(), gomock.Eq("foo"), gomock.Eq(err)).Do(func(template any, args ...any) { wg.Done() }).Times(1),
+					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template any, args ...any) { wg.Done() }).Times(1),
 				)
 
-				gc.Run(id)
+				if err := gc.Run(id); err != nil {
+					t.Error(err)
+				}
 			},
 		},
 		{
@@ -158,9 +161,9 @@ func TestGCRun(t *testing.T) {
 				Interval: 2 * time.Hour,
 				Timeout:  1 * time.Hour,
 			},
-			run: func(gc GC, id string, ml *mocks.MockLogger, mr *mocks.MockRunner, t *testing.T) {
+			run: func(gc GC, id string, ml *MockLogger, mr *MockRunner, t *testing.T) {
 				assert := assert.New(t)
-				assert.EqualError(gc.Run("bar"), "can not find the task")
+				assert.EqualError(gc.Run("bar"), "can not find task bar")
 			},
 		},
 	}
@@ -168,8 +171,8 @@ func TestGCRun(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := gomock.NewController(t)
-			mockLogger := mocks.NewMockLogger(ctl)
-			mockRunner := mocks.NewMockRunner(ctl)
+			mockLogger := NewMockLogger(ctl)
+			mockRunner := NewMockRunner(ctl)
 
 			gc := New(WithLogger(mockLogger))
 			if err := gc.Add(Task{
@@ -186,15 +189,15 @@ func TestGCRun(t *testing.T) {
 	}
 }
 
-func TestGCRunAll(t *testing.T) {
+func TestGC_RunAll(t *testing.T) {
 	tests := []struct {
 		name  string
 		task1 Task
 		task2 Task
-		run   func(gc GC, ml *mocks.MockLogger, mr *mocks.MockRunner)
+		run   func(gc GC, ml *MockLogger, mr *MockRunner)
 	}{
 		{
-			name: "run task succeeded",
+			name: "run task",
 			task1: Task{
 				ID:       "foo",
 				Interval: 2 * time.Hour,
@@ -205,15 +208,15 @@ func TestGCRunAll(t *testing.T) {
 				Interval: 2 * time.Hour,
 				Timeout:  1 * time.Hour,
 			},
-			run: func(gc GC, ml *mocks.MockLogger, mr *mocks.MockRunner) {
+			run: func(gc GC, ml *MockLogger, mr *MockRunner) {
 				var wg sync.WaitGroup
 				wg.Add(3)
 				defer wg.Wait()
 
 				gomock.InOrder(
-					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template interface{}, args ...interface{}) { wg.Done() }).Times(1),
+					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template any, args ...any) { wg.Done() }).Times(1),
 					mr.EXPECT().RunGC().Do(func() { wg.Done() }).Return(nil).Times(1),
-					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template interface{}, args ...interface{}) { wg.Done() }).Times(1),
+					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template any, args ...any) { wg.Done() }).Times(1),
 				)
 
 				gc.RunAll()
@@ -231,17 +234,17 @@ func TestGCRunAll(t *testing.T) {
 				Interval: 2 * time.Hour,
 				Timeout:  1 * time.Hour,
 			},
-			run: func(gc GC, ml *mocks.MockLogger, mr *mocks.MockRunner) {
+			run: func(gc GC, ml *MockLogger, mr *MockRunner) {
 				var wg sync.WaitGroup
 				wg.Add(4)
 				defer wg.Wait()
 
 				err := errors.New("baz")
 				gomock.InOrder(
-					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template interface{}, args ...interface{}) { wg.Done() }).Times(1),
+					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template any, args ...any) { wg.Done() }).Times(1),
 					mr.EXPECT().RunGC().Do(func() { wg.Done() }).Return(err).Times(1),
-					ml.EXPECT().Errorf(gomock.Any(), gomock.Eq("foo"), gomock.Eq(err)).Do(func(template interface{}, args ...interface{}) { wg.Done() }).Times(1),
-					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template interface{}, args ...interface{}) { wg.Done() }).Times(1),
+					ml.EXPECT().Errorf(gomock.Any(), gomock.Eq("foo"), gomock.Eq(err)).Do(func(template any, args ...any) { wg.Done() }).Times(1),
+					ml.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template any, args ...any) { wg.Done() }).Times(1),
 				)
 
 				gc.RunAll()
@@ -252,8 +255,8 @@ func TestGCRunAll(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := gomock.NewController(t)
-			mockLogger := mocks.NewMockLogger(ctl)
-			mockRunner := mocks.NewMockRunner(ctl)
+			mockLogger := NewMockLogger(ctl)
+			mockRunner := NewMockRunner(ctl)
 
 			gc := New(WithLogger(mockLogger))
 
@@ -271,10 +274,10 @@ func TestGCRunAll(t *testing.T) {
 	}
 }
 
-func TestGCServe(t *testing.T) {
+func TestGC_Start(t *testing.T) {
 	ctl := gomock.NewController(t)
-	mockLogger := mocks.NewMockLogger(ctl)
-	mockRunner := mocks.NewMockRunner(ctl)
+	mockLogger := NewMockLogger(ctl)
+	mockRunner := NewMockRunner(ctl)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -290,10 +293,10 @@ func TestGCServe(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mockLogger.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template string, args ...interface{}) {
+	mockLogger.EXPECT().Infof(gomock.Any(), gomock.Eq("foo")).Do(func(template string, args ...any) {
 		wg.Done()
 	}).Times(1)
 
-	gc.Serve()
+	gc.Start()
 	gc.Stop()
 }

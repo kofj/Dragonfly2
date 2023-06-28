@@ -19,17 +19,20 @@ package handlers
 import (
 	"net/http"
 
-	"d7y.io/dragonfly/v2/manager/types"
 	"github.com/gin-gonic/gin"
+
+	// nolint
+	_ "d7y.io/dragonfly/v2/manager/models"
+	"d7y.io/dragonfly/v2/manager/types"
 )
 
 // @Summary Create Scheduler
-// @Description create by json config
+// @Description Create by json config
 // @Tags Scheduler
 // @Accept json
 // @Produce json
 // @Param Scheduler body types.CreateSchedulerRequest true "Scheduler"
-// @Success 200 {object} model.Scheduler
+// @Success 200 {object} models.Scheduler
 // @Failure 400
 // @Failure 404
 // @Failure 500
@@ -41,9 +44,9 @@ func (h *Handlers) CreateScheduler(ctx *gin.Context) {
 		return
 	}
 
-	scheduler, err := h.service.CreateScheduler(json)
+	scheduler, err := h.service.CreateScheduler(ctx.Request.Context(), json)
 	if err != nil {
-		ctx.Error(err)
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
@@ -68,8 +71,8 @@ func (h *Handlers) DestroyScheduler(ctx *gin.Context) {
 		return
 	}
 
-	if err := h.service.DestroyScheduler(params.ID); err != nil {
-		ctx.Error(err)
+	if err := h.service.DestroyScheduler(ctx.Request.Context(), params.ID); err != nil {
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
@@ -83,7 +86,7 @@ func (h *Handlers) DestroyScheduler(ctx *gin.Context) {
 // @Produce json
 // @Param id path string true "id"
 // @Param Scheduler body types.UpdateSchedulerRequest true "Scheduler"
-// @Success 200 {object} model.Scheduler
+// @Success 200 {object} models.Scheduler
 // @Failure 400
 // @Failure 404
 // @Failure 500
@@ -91,19 +94,19 @@ func (h *Handlers) DestroyScheduler(ctx *gin.Context) {
 func (h *Handlers) UpdateScheduler(ctx *gin.Context) {
 	var params types.SchedulerParams
 	if err := ctx.ShouldBindUri(&params); err != nil {
-		ctx.Error(err)
+		ctx.JSON(http.StatusUnprocessableEntity, gin.H{"errors": err.Error()})
 		return
 	}
 
 	var json types.UpdateSchedulerRequest
 	if err := ctx.ShouldBindJSON(&json); err != nil {
-		ctx.Error(err)
+		ctx.JSON(http.StatusUnprocessableEntity, gin.H{"errors": err.Error()})
 		return
 	}
 
-	scheduler, err := h.service.UpdateScheduler(params.ID, json)
+	scheduler, err := h.service.UpdateScheduler(ctx.Request.Context(), params.ID, json)
 	if err != nil {
-		ctx.Error(err)
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
@@ -116,7 +119,7 @@ func (h *Handlers) UpdateScheduler(ctx *gin.Context) {
 // @Accept json
 // @Produce json
 // @Param id path string true "id"
-// @Success 200 {object} model.Scheduler
+// @Success 200 {object} models.Scheduler
 // @Failure 400
 // @Failure 404
 // @Failure 500
@@ -128,9 +131,9 @@ func (h *Handlers) GetScheduler(ctx *gin.Context) {
 		return
 	}
 
-	scheduler, err := h.service.GetScheduler(params.ID)
+	scheduler, err := h.service.GetScheduler(ctx.Request.Context(), params.ID)
 	if err != nil {
-		ctx.Error(err)
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
@@ -144,7 +147,7 @@ func (h *Handlers) GetScheduler(ctx *gin.Context) {
 // @Produce json
 // @Param page query int true "current page" default(0)
 // @Param per_page query int true "return max item count, default 10, max 50" default(10) minimum(2) maximum(50)
-// @Success 200 {object} []model.Scheduler
+// @Success 200 {object} []models.Scheduler
 // @Failure 400
 // @Failure 404
 // @Failure 500
@@ -157,18 +160,12 @@ func (h *Handlers) GetSchedulers(ctx *gin.Context) {
 	}
 
 	h.setPaginationDefault(&query.Page, &query.PerPage)
-	schedulers, err := h.service.GetSchedulers(query)
+	schedulers, count, err := h.service.GetSchedulers(ctx.Request.Context(), query)
 	if err != nil {
-		ctx.Error(err)
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
-	totalCount, err := h.service.SchedulerTotalCount(query)
-	if err != nil {
-		ctx.Error(err)
-		return
-	}
-
-	h.setPaginationLinkHeader(ctx, query.Page, query.PerPage, int(totalCount))
+	h.setPaginationLinkHeader(ctx, query.Page, query.PerPage, int(count))
 	ctx.JSON(http.StatusOK, schedulers)
 }

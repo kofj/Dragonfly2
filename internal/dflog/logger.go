@@ -18,51 +18,73 @@ package logger
 
 import (
 	"fmt"
+	"os"
+	"path"
+	"strconv"
+	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc/grpclog"
 )
 
 var (
 	CoreLogger       *zap.SugaredLogger
 	GrpcLogger       *zap.SugaredLogger
-	GcLogger         *zap.SugaredLogger
+	GinLogger        *zap.SugaredLogger
+	GCLogger         *zap.SugaredLogger
+	StorageGCLogger  *zap.SugaredLogger
+	JobLogger        *zap.SugaredLogger
 	KeepAliveLogger  *zap.SugaredLogger
-	StatPeerLogger   *zap.Logger
 	StatSeedLogger   *zap.Logger
 	DownloaderLogger *zap.Logger
+
+	coreLogLevelEnabler zapcore.LevelEnabler
 )
 
 func init() {
 	config := zap.NewDevelopmentConfig()
-	config.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+	config.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
 	log, err := config.Build(zap.AddCaller(), zap.AddStacktrace(zap.WarnLevel), zap.AddCallerSkip(1))
 	if err == nil {
 		sugar := log.Sugar()
 		SetCoreLogger(sugar)
 		SetGrpcLogger(sugar)
-		SetGcLogger(sugar)
+		SetGinLogger(sugar)
+		SetGCLogger(sugar)
+		SetStorageGCLogger(sugar)
 		SetKeepAliveLogger(sugar)
-		SetStatPeerLogger(log)
 		SetStatSeedLogger(log)
 		SetDownloadLogger(log)
+		SetJobLogger(sugar)
+	}
+	levels = append(levels, config.Level)
+}
+
+// SetLevel updates all log level
+func SetLevel(level zapcore.Level) {
+	Infof("change log level to %s", level.String())
+	for _, l := range levels {
+		l.SetLevel(level)
 	}
 }
 
 func SetCoreLogger(log *zap.SugaredLogger) {
 	CoreLogger = log
+	coreLogLevelEnabler = log.Desugar().Core()
 }
 
-func SetGcLogger(log *zap.SugaredLogger) {
-	GcLogger = log
+func SetGCLogger(log *zap.SugaredLogger) {
+	GCLogger = log
+}
+
+func SetStorageGCLogger(log *zap.SugaredLogger) {
+	StorageGCLogger = log
 }
 
 func SetKeepAliveLogger(log *zap.SugaredLogger) {
 	KeepAliveLogger = log
-}
-
-func SetStatPeerLogger(log *zap.Logger) {
-	StatPeerLogger = log
 }
 
 func SetStatSeedLogger(log *zap.Logger) {
@@ -75,123 +97,265 @@ func SetDownloadLogger(log *zap.Logger) {
 
 func SetGrpcLogger(log *zap.SugaredLogger) {
 	GrpcLogger = log
-	grpclog.SetLoggerV2(&zapGrpc{GrpcLogger})
+	var v int
+	vLevel := os.Getenv("GRPC_GO_LOG_VERBOSITY_LEVEL")
+	if vl, err := strconv.Atoi(vLevel); err == nil {
+		v = vl
+	}
+	grpclog.SetLoggerV2(&zapGrpc{GrpcLogger, v})
+}
+
+func SetGinLogger(log *zap.SugaredLogger) {
+	GinLogger = log
+}
+
+func SetJobLogger(log *zap.SugaredLogger) {
+	JobLogger = log
 }
 
 type SugaredLoggerOnWith struct {
-	withArgs []interface{}
+	withArgs []any
 }
 
-func With(args ...interface{}) *SugaredLoggerOnWith {
+func With(args ...any) *SugaredLoggerOnWith {
 	return &SugaredLoggerOnWith{
 		withArgs: args,
 	}
 }
 
+func WithPeer(hostID, taskID, peerID string) *SugaredLoggerOnWith {
+	return &SugaredLoggerOnWith{
+		withArgs: []any{"hostID", hostID, "taskID", taskID, "peerID", peerID},
+	}
+}
+
+func WithTask(taskID, url string) *SugaredLoggerOnWith {
+	return &SugaredLoggerOnWith{
+		withArgs: []any{"taskID", taskID, "url", url},
+	}
+}
+
+func WithHost(hostID, hostname, ip string) *SugaredLoggerOnWith {
+	return &SugaredLoggerOnWith{
+		withArgs: []any{"hostID", hostID, "hostname", hostname, "ip", ip},
+	}
+}
+
 func WithTaskID(taskID string) *SugaredLoggerOnWith {
 	return &SugaredLoggerOnWith{
-		withArgs: []interface{}{"taskId", taskID},
+		withArgs: []any{"taskID", taskID},
 	}
 }
 
-func WithTaskAndPeerID(taskID string, peerID string) *SugaredLoggerOnWith {
+func WithHostID(hostID string) *SugaredLoggerOnWith {
 	return &SugaredLoggerOnWith{
-		withArgs: []interface{}{"taskId", taskID, "peerID", peerID},
+		withArgs: []any{"hostID", hostID},
 	}
 }
 
-func (log *SugaredLoggerOnWith) Infof(template string, args ...interface{}) {
+func WithKeepAlive(hostname, ip, sourceType string, clusterID uint64) *SugaredLoggerOnWith {
+	return &SugaredLoggerOnWith{
+		withArgs: []any{"hostname", hostname, "ip", ip, "sourceType", sourceType, "clusterID", clusterID},
+	}
+}
+
+func WithTaskAndPeerID(taskID, peerID string) *SugaredLoggerOnWith {
+	return &SugaredLoggerOnWith{
+		withArgs: []any{"taskID", taskID, "peerID", peerID},
+	}
+}
+
+func WithHostnameAndIP(hostname, ip string) *SugaredLoggerOnWith {
+	return &SugaredLoggerOnWith{
+		withArgs: []any{"hostname", hostname, "ip", ip},
+	}
+}
+
+func WithGroupAndJobID(taskID, jobID string) *SugaredLoggerOnWith {
+	return &SugaredLoggerOnWith{
+		withArgs: []any{"groupID", taskID, "jobID", jobID},
+	}
+}
+
+func WithGroupAndTaskID(groupID, taskID string) *SugaredLoggerOnWith {
+	return &SugaredLoggerOnWith{
+		withArgs: []any{"groupID", groupID, "taskID", taskID},
+	}
+}
+
+func (log *SugaredLoggerOnWith) With(args ...any) *SugaredLoggerOnWith {
+	args = append(args, log.withArgs...)
+	return &SugaredLoggerOnWith{
+		withArgs: args,
+	}
+}
+
+func (log *SugaredLoggerOnWith) Infof(template string, args ...any) {
+	if !coreLogLevelEnabler.Enabled(zap.InfoLevel) {
+		return
+	}
 	CoreLogger.Infow(fmt.Sprintf(template, args...), log.withArgs...)
 }
 
-func (log *SugaredLoggerOnWith) Info(args ...interface{}) {
+func (log *SugaredLoggerOnWith) Info(args ...any) {
+	if !coreLogLevelEnabler.Enabled(zap.InfoLevel) {
+		return
+	}
 	CoreLogger.Infow(fmt.Sprint(args...), log.withArgs...)
 }
 
-func (log *SugaredLoggerOnWith) Warnf(template string, args ...interface{}) {
+func (log *SugaredLoggerOnWith) Warnf(template string, args ...any) {
+	if !coreLogLevelEnabler.Enabled(zap.WarnLevel) {
+		return
+	}
 	CoreLogger.Warnw(fmt.Sprintf(template, args...), log.withArgs...)
 }
 
-func (log *SugaredLoggerOnWith) Warn(args ...interface{}) {
+func (log *SugaredLoggerOnWith) Warn(args ...any) {
+	if !coreLogLevelEnabler.Enabled(zap.WarnLevel) {
+		return
+	}
 	CoreLogger.Warnw(fmt.Sprint(args...), log.withArgs...)
 }
 
-func (log *SugaredLoggerOnWith) Errorf(template string, args ...interface{}) {
+func (log *SugaredLoggerOnWith) Errorf(template string, args ...any) {
+	if !coreLogLevelEnabler.Enabled(zap.ErrorLevel) {
+		return
+	}
 	CoreLogger.Errorw(fmt.Sprintf(template, args...), log.withArgs...)
 }
 
-func (log *SugaredLoggerOnWith) Error(args ...interface{}) {
+func (log *SugaredLoggerOnWith) Error(args ...any) {
+	if !coreLogLevelEnabler.Enabled(zap.ErrorLevel) {
+		return
+	}
 	CoreLogger.Errorw(fmt.Sprint(args...), log.withArgs...)
 }
 
-func (log *SugaredLoggerOnWith) Debugf(template string, args ...interface{}) {
+func (log *SugaredLoggerOnWith) Debugf(template string, args ...any) {
+	if !coreLogLevelEnabler.Enabled(zap.DebugLevel) {
+		return
+	}
 	CoreLogger.Debugw(fmt.Sprintf(template, args...), log.withArgs...)
 }
 
-func (log *SugaredLoggerOnWith) Debug(args ...interface{}) {
+func (log *SugaredLoggerOnWith) Debug(args ...any) {
+	if !coreLogLevelEnabler.Enabled(zap.DebugLevel) {
+		return
+	}
 	CoreLogger.Debugw(fmt.Sprint(args...), log.withArgs...)
 }
 
-func Infof(template string, args ...interface{}) {
+func (log *SugaredLoggerOnWith) IsDebug() bool {
+	return coreLogLevelEnabler.Enabled(zap.DebugLevel)
+}
+
+func Infof(template string, args ...any) {
 	CoreLogger.Infof(template, args...)
 }
 
-func Info(args ...interface{}) {
+func Info(args ...any) {
 	CoreLogger.Info(args...)
 }
 
-func Warnf(template string, args ...interface{}) {
+func Warnf(template string, args ...any) {
 	CoreLogger.Warnf(template, args...)
 }
 
-func Errorf(template string, args ...interface{}) {
+func Warn(args ...any) {
+	CoreLogger.Warn(args...)
+}
+
+func Errorf(template string, args ...any) {
 	CoreLogger.Errorf(template, args...)
 }
 
-func Error(args ...interface{}) {
+func Error(args ...any) {
 	CoreLogger.Error(args...)
 }
 
-func Debugf(template string, args ...interface{}) {
+func Debugf(template string, args ...any) {
 	CoreLogger.Debugf(template, args...)
 }
 
-func Fatalf(template string, args ...interface{}) {
+func Debug(args ...any) {
+	CoreLogger.Debug(args...)
+}
+
+func IsDebug() bool {
+	return coreLogLevelEnabler.Enabled(zap.DebugLevel)
+}
+
+func Fatalf(template string, args ...any) {
 	CoreLogger.Fatalf(template, args...)
 }
 
-func Fatal(args ...interface{}) {
+func Fatal(args ...any) {
 	CoreLogger.Fatal(args...)
 }
 
 type zapGrpc struct {
 	*zap.SugaredLogger
+	verbose int
 }
 
-func (z *zapGrpc) Infoln(args ...interface{}) {
+func (z *zapGrpc) Infoln(args ...any) {
 	z.SugaredLogger.Info(args...)
 }
 
-func (z *zapGrpc) Warning(args ...interface{}) {
+func (z *zapGrpc) Warning(args ...any) {
 	z.SugaredLogger.Warn(args...)
 }
 
-func (z *zapGrpc) Warningln(args ...interface{}) {
+func (z *zapGrpc) Warningln(args ...any) {
 	z.SugaredLogger.Warn(args...)
 }
 
-func (z *zapGrpc) Warningf(format string, args ...interface{}) {
+func (z *zapGrpc) Warningf(format string, args ...any) {
 	z.SugaredLogger.Warnf(format, args...)
 }
 
-func (z *zapGrpc) Errorln(args ...interface{}) {
+func (z *zapGrpc) Errorln(args ...any) {
 	z.SugaredLogger.Error(args...)
 }
 
-func (z *zapGrpc) Fatalln(args ...interface{}) {
+func (z *zapGrpc) Fatalln(args ...any) {
 	z.SugaredLogger.Fatal(args...)
 }
 
 func (z *zapGrpc) V(level int) bool {
-	return level > 0
+	return level <= z.verbose
+}
+
+// Redirect stdout and stderr to file for debugging.
+func RedirectStdoutAndStderr(console bool, logDir string) {
+	// When console log is enabled, skip redirect.
+	if console {
+		return
+	}
+
+	// Redirect stdout to stdout.log file.
+	stdoutPath := path.Join(logDir, "stdout.log")
+	if stdout, err := os.OpenFile(stdoutPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND|os.O_SYNC, 0644); err != nil {
+		Warnf("open %s error: %s", stdoutPath, err)
+	} else {
+		err := unix.Dup2(int(stdout.Fd()), int(os.Stdout.Fd()))
+		if err != nil {
+			Warnf("redirect stdout error: %s", err)
+		} else {
+			fmt.Fprintf(os.Stdout, "stdout redirect at %v\n", time.Now())
+		}
+	}
+
+	// Redirect stderr to stderr.log file.
+	stderrPath := path.Join(logDir, "stderr.log")
+	if stderr, err := os.OpenFile(stderrPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND|os.O_SYNC, 0644); err != nil {
+		Warnf("open %s error: %s", stderrPath, err)
+	} else {
+		if err := unix.Dup2(int(stderr.Fd()), int(os.Stderr.Fd())); err != nil {
+			Warnf("redirect stderr error: %s", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "stderr redirect at %v\n", time.Now())
+		}
+	}
 }

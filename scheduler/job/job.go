@@ -14,167 +14,193 @@
  * limitations under the License.
  */
 
+//go:generate mockgen -destination mocks/job_mock.go -source job.go -package mocks
+
 package job
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"time"
 
-	logger "d7y.io/dragonfly/v2/internal/dflog"
-	"d7y.io/dragonfly/v2/internal/idgen"
-	internaljob "d7y.io/dragonfly/v2/internal/job"
-	"d7y.io/dragonfly/v2/pkg/rpc/base"
-	"d7y.io/dragonfly/v2/scheduler/config"
-	"d7y.io/dragonfly/v2/scheduler/core"
-	"d7y.io/dragonfly/v2/scheduler/supervisor"
+	"github.com/RichardKnop/machinery/v1"
+	"github.com/go-http-utils/headers"
 	"github.com/go-playground/validator/v10"
-	"github.com/pkg/errors"
+
+	cdnsystemv1 "d7y.io/api/pkg/apis/cdnsystem/v1"
+	commonv1 "d7y.io/api/pkg/apis/common/v1"
+
+	logger "d7y.io/dragonfly/v2/internal/dflog"
+	internaljob "d7y.io/dragonfly/v2/internal/job"
+	"d7y.io/dragonfly/v2/pkg/idgen"
+	"d7y.io/dragonfly/v2/pkg/net/http"
+	"d7y.io/dragonfly/v2/scheduler/config"
+	"d7y.io/dragonfly/v2/scheduler/resource"
 )
 
 const (
-	interval = time.Second
+	// preheatTimeout is timeout of preheating.
+	preheatTimeout = 20 * time.Minute
 )
 
 type Job interface {
-	Serve() error
-	Stop()
+	Serve()
 }
 
 type job struct {
 	globalJob    *internaljob.Job
 	schedulerJob *internaljob.Job
 	localJob     *internaljob.Job
-	ctx          context.Context
-	service      *core.SchedulerService
-	cfg          *config.JobConfig
+	resource     resource.Resource
+	config       *config.Config
 }
 
-func New(ctx context.Context, cfg *config.JobConfig, hostname string, service *core.SchedulerService) (Job, error) {
+func New(cfg *config.Config, resource resource.Resource) (Job, error) {
 	redisConfig := &internaljob.Config{
-		Host:      cfg.Redis.Host,
-		Port:      cfg.Redis.Port,
-		Password:  cfg.Redis.Password,
-		BrokerDB:  cfg.Redis.BrokerDB,
-		BackendDB: cfg.Redis.BackendDB,
+		Addrs:      cfg.Database.Redis.Addrs,
+		MasterName: cfg.Database.Redis.MasterName,
+		Username:   cfg.Database.Redis.Username,
+		Password:   cfg.Database.Redis.Password,
+		BrokerDB:   cfg.Database.Redis.BrokerDB,
+		BackendDB:  cfg.Database.Redis.BackendDB,
 	}
 
 	globalJob, err := internaljob.New(redisConfig, internaljob.GlobalQueue)
 	if err != nil {
-		logger.Errorf("create global job queue error: %v", err)
+		logger.Errorf("create global job queue error: %s", err.Error())
 		return nil, err
 	}
+	logger.Infof("create global job queue: %v", globalJob)
 
 	schedulerJob, err := internaljob.New(redisConfig, internaljob.SchedulersQueue)
 	if err != nil {
-		logger.Errorf("create scheduler job queue error: %v", err)
+		logger.Errorf("create scheduler job queue error: %s", err.Error())
 		return nil, err
 	}
+	logger.Infof("create scheduler job queue: %v", schedulerJob)
 
-	localQueue, err := internaljob.GetSchedulerQueue(hostname)
+	localQueue, err := internaljob.GetSchedulerQueue(cfg.Manager.SchedulerClusterID, cfg.Server.Host)
 	if err != nil {
-		logger.Errorf("get local job queue name error: %v", err)
+		logger.Errorf("get local job queue name error: %s", err.Error())
 		return nil, err
 	}
 
 	localJob, err := internaljob.New(redisConfig, localQueue)
 	if err != nil {
-		logger.Errorf("create local job queue error: %v", err)
+		logger.Errorf("create local job queue error: %s", err.Error())
 		return nil, err
 	}
+	logger.Infof("create local job queue: %v", localQueue)
 
 	t := &job{
 		globalJob:    globalJob,
 		schedulerJob: schedulerJob,
 		localJob:     localJob,
-		ctx:          ctx,
-		service:      service,
-		cfg:          cfg,
+		resource:     resource,
+		config:       cfg,
 	}
 
-	namedJobFuncs := map[string]interface{}{
+	namedJobFuncs := map[string]any{
 		internaljob.PreheatJob: t.preheat,
 	}
 
 	if err := localJob.RegisterJob(namedJobFuncs); err != nil {
-		logger.Errorf("register preheat job to local queue error: %v", err)
+		logger.Errorf("register preheat job to local queue error: %s", err.Error())
 		return nil, err
 	}
 
 	return t, nil
 }
 
-func (t *job) Serve() error {
+func (j *job) Serve() {
 	go func() {
-		logger.Infof("ready to launch %d worker(s) on global queue", t.cfg.GlobalWorkerNum)
-		if err := t.globalJob.LaunchWorker("global_worker", int(t.cfg.GlobalWorkerNum)); err != nil {
-			logger.Fatalf("global queue worker error: %v", err)
+		logger.Infof("ready to launch %d worker(s) on global queue", j.config.Job.GlobalWorkerNum)
+		if err := j.globalJob.LaunchWorker("global_worker", int(j.config.Job.GlobalWorkerNum)); err != nil {
+			if !errors.Is(err, machinery.ErrWorkerQuitGracefully) {
+				logger.Fatalf("global queue worker error: %s", err.Error())
+			}
 		}
 	}()
 
 	go func() {
-		logger.Infof("ready to launch %d worker(s) on scheduler queue", t.cfg.SchedulerWorkerNum)
-		if err := t.schedulerJob.LaunchWorker("scheduler_worker", int(t.cfg.SchedulerWorkerNum)); err != nil {
-			logger.Fatalf("scheduler queue worker error: %v", err)
+		logger.Infof("ready to launch %d worker(s) on scheduler queue", j.config.Job.SchedulerWorkerNum)
+		if err := j.schedulerJob.LaunchWorker("scheduler_worker", int(j.config.Job.SchedulerWorkerNum)); err != nil {
+			if !errors.Is(err, machinery.ErrWorkerQuitGracefully) {
+				logger.Fatalf("scheduler queue worker error: %s", err.Error())
+			}
 		}
 	}()
 
-	logger.Infof("ready to launch %d worker(s) on local queue", t.cfg.LocalWorkerNum)
-	return t.localJob.LaunchWorker("local_worker", int(t.cfg.LocalWorkerNum))
+	go func() {
+		logger.Infof("ready to launch %d worker(s) on local queue", j.config.Job.LocalWorkerNum)
+		if err := j.localJob.LaunchWorker("local_worker", int(j.config.Job.LocalWorkerNum)); err != nil {
+			if !errors.Is(err, machinery.ErrWorkerQuitGracefully) {
+				logger.Fatalf("scheduler queue worker error: %s", err.Error())
+			}
+		}
+	}()
 }
 
-func (t *job) Stop() {
-	t.globalJob.Worker.Quit()
-	t.schedulerJob.Worker.Quit()
-	t.localJob.Worker.Quit()
-}
+func (j *job) preheat(ctx context.Context, req string) error {
+	ctx, cancel := context.WithTimeout(ctx, preheatTimeout)
+	defer cancel()
 
-func (t *job) preheat(req string) error {
-	request := &internaljob.PreheatRequest{}
-	if err := internaljob.UnmarshalRequest(req, request); err != nil {
-		logger.Errorf("unmarshal request err: %v, request body: %s", err, req)
+	if !j.config.SeedPeer.Enable {
+		return errors.New("scheduler has disabled seed peer")
+	}
+
+	preheat := &internaljob.PreheatRequest{}
+	if err := internaljob.UnmarshalRequest(req, preheat); err != nil {
+		logger.Errorf("unmarshal request err: %s, request body: %s", err.Error(), req)
 		return err
 	}
 
-	if err := validator.New().Struct(request); err != nil {
-		logger.Errorf("request url \"%s\" is invalid, error: %v", request.URL, err)
-		return errors.Errorf("invalid url: %s", request.URL)
+	if err := validator.New().Struct(preheat); err != nil {
+		logger.Errorf("preheat %s validate failed: %s", preheat.URL, err.Error())
+		return err
 	}
 
-	meta := &base.UrlMeta{
-		Header: request.Headers,
-		Tag:    request.Tag,
-		Filter: request.Filter,
-		Digest: request.Digest,
+	urlMeta := &commonv1.UrlMeta{
+		Digest:      preheat.Digest,
+		Tag:         preheat.Tag,
+		Filter:      preheat.Filter,
+		Header:      preheat.Headers,
+		Application: preheat.Application,
+		Priority:    commonv1.Priority(preheat.Priority),
+	}
+	if preheat.Headers != nil {
+		if r, ok := preheat.Headers[headers.Range]; ok {
+			// Range in dragonfly is without "bytes=".
+			urlMeta.Range = strings.TrimLeft(r, http.RangePrefix)
+		}
 	}
 
-	// Generate range
-	if rg := request.Headers["Range"]; len(rg) > 0 {
-		meta.Range = rg
+	// Trigger seed peer download seeds.
+	taskID := idgen.TaskIDV1(preheat.URL, urlMeta)
+	log := logger.WithTask(taskID, preheat.URL)
+	log.Infof("preheat %s headers: %#v, tag: %s, range: %s, filter: %s, digest: %s",
+		preheat.URL, urlMeta.Header, urlMeta.Tag, urlMeta.Range, urlMeta.Filter, urlMeta.Digest)
+	stream, err := j.resource.SeedPeer().Client().ObtainSeeds(ctx, &cdnsystemv1.SeedRequest{
+		TaskId:  taskID,
+		Url:     preheat.URL,
+		UrlMeta: urlMeta,
+	})
+	if err != nil {
+		log.Errorf("preheat %s failed: %s", preheat.URL, err.Error())
+		return err
 	}
-
-	taskID := idgen.TaskID(request.URL, meta)
-	logger.Debugf("ready to preheat \"%s\", taskID = %s", request.URL, taskID)
-
-	task := supervisor.NewTask(taskID, request.URL, meta)
-	task = t.service.GetOrCreateTask(t.ctx, task)
-	return getPreheatResult(task)
-}
-
-//TODO(@zzy987) check better ways to get result
-func getPreheatResult(task *supervisor.Task) error {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
 
 	for {
-		select {
-		case <-ticker.C:
-			switch task.GetStatus() {
-			case supervisor.TaskStatusFail:
-				return errors.Errorf("preheat task fail")
-			case supervisor.TaskStatusSuccess:
-				return nil
-			default:
-			}
+		piece, err := stream.Recv()
+		if err != nil {
+			log.Errorf("preheat %s recive piece failed: %s", preheat.URL, err.Error())
+			return err
+		}
+
+		if piece.Done == true {
+			log.Infof("preheat %s succeeded", preheat.URL)
+			return nil
 		}
 	}
 }

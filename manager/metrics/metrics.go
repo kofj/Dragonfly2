@@ -19,18 +19,55 @@ package metrics
 import (
 	"net/http"
 
-	"d7y.io/dragonfly/v2/manager/config"
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
+
+	"d7y.io/dragonfly/v2/manager/config"
+	"d7y.io/dragonfly/v2/pkg/types"
+	"d7y.io/dragonfly/v2/version"
 )
 
-func New(cfg *config.RestConfig, grpcServer *grpc.Server) *http.Server {
+// Variables declared for metrics.
+var (
+	PeerGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: types.MetricsNamespace,
+		Subsystem: types.ManagerMetricsName,
+		Name:      "peer_total",
+		Help:      "Gauge of the number of peer.",
+	}, []string{"version", "commit"})
+
+	SearchSchedulerClusterCount = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: types.MetricsNamespace,
+		Subsystem: types.ManagerMetricsName,
+		Name:      "search_scheduler_cluster_total",
+		Help:      "Counter of the number of searching scheduler cluster.",
+	}, []string{"version", "commit"})
+
+	SearchSchedulerClusterFailureCount = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: types.MetricsNamespace,
+		Subsystem: types.ManagerMetricsName,
+		Name:      "search_scheduler_cluster_failure_total",
+		Help:      "Counter of the number of failed of searching scheduler cluster.",
+	}, []string{"version", "commit"})
+
+	VersionGauge = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: types.MetricsNamespace,
+		Subsystem: types.ManagerMetricsName,
+		Name:      "version",
+		Help:      "Version info of the service.",
+	}, []string{"major", "minor", "git_version", "git_commit", "platform", "build_time", "go_version", "go_tags", "go_gcflags"})
+)
+
+func New(cfg *config.MetricsConfig, grpcServer *grpc.Server) *http.Server {
 	grpc_prometheus.Register(grpcServer)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 
+	VersionGauge.WithLabelValues(version.Major, version.Minor, version.GitVersion, version.GitCommit, version.Platform, version.BuildTime, version.GoVersion, version.Gotags, version.Gogcflags).Set(1)
 	return &http.Server{
 		Addr:    cfg.Addr,
 		Handler: mux,

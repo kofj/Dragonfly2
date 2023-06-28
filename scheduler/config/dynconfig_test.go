@@ -17,90 +17,434 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 	"time"
 
-	dc "d7y.io/dragonfly/v2/internal/dynconfig"
-	"d7y.io/dragonfly/v2/pkg/rpc/manager"
-	"d7y.io/dragonfly/v2/scheduler/config/mocks"
 	"github.com/golang/mock/gomock"
-	"github.com/pkg/errors"
 	"github.com/stretchr/testify/assert"
+
+	commonv2 "d7y.io/api/pkg/apis/common/v2"
+	managerv2 "d7y.io/api/pkg/apis/manager/v2"
+
+	"d7y.io/dragonfly/v2/pkg/rpc/manager/client/mocks"
+	"d7y.io/dragonfly/v2/pkg/types"
 )
 
-func TestDynconfigGet_ManagerSourceType(t *testing.T) {
+func TestDynconfig_Get(t *testing.T) {
+	mockCacheDir := t.TempDir()
+	mockConfig := &Config{
+		DynConfig: DynConfig{},
+		Server: ServerConfig{
+			Host: "localhost",
+		},
+		Manager: ManagerConfig{
+			SchedulerClusterID: 1,
+		},
+	}
+
+	mockCachePath := filepath.Join(mockCacheDir, cacheFileName)
 	tests := []struct {
-		name           string
-		expire         time.Duration
-		sleep          func()
-		cleanFileCache func(t *testing.T)
-		mock           func(m *mocks.MockClientMockRecorder)
-		expect         func(t *testing.T, data *DynconfigData, err error)
+		name            string
+		refreshInterval time.Duration
+		sleep           func()
+		cleanFileCache  func(t *testing.T)
+		mock            func(m *mocks.MockV2MockRecorder)
+		expect          func(t *testing.T, data *DynconfigData, err error)
 	}{
 		{
-			name:   "get dynconfig success",
-			expire: 10 * time.Second,
+			name:            "get dynconfig success",
+			refreshInterval: 10 * time.Second,
 			cleanFileCache: func(t *testing.T) {
-				if err := os.Remove(DefaultDynconfigCachePath); err != nil {
+				if err := os.Remove(mockCachePath); err != nil {
 					t.Fatal(err)
 				}
 			},
 			sleep: func() {},
-			mock: func(m *mocks.MockClientMockRecorder) {
-				m.GetScheduler(gomock.Any()).Return(&manager.Scheduler{
-					Cdns: []*manager.CDN{
+			mock: func(m *mocks.MockV2MockRecorder) {
+				m.GetScheduler(gomock.Any(), gomock.Any()).Return(&managerv2.Scheduler{
+					Id:       1,
+					Hostname: "foo",
+					Idc:      "idc",
+					Location: "location",
+					Ip:       "127.0.0.1",
+					Port:     8002,
+					State:    "active",
+					SeedPeers: []*managerv2.SeedPeer{
 						{
-							HostName:     "foo",
+							Id:           1,
+							Hostname:     "bar",
+							Type:         types.HostTypeStrongSeedName,
+							Idc:          "idc",
+							Location:     "location",
 							Ip:           "127.0.0.1",
 							Port:         8001,
 							DownloadPort: 8003,
+							SeedPeerCluster: &managerv2.SeedPeerCluster{
+								Id:     1,
+								Name:   "baz",
+								Config: []byte{1},
+							},
+						},
+					},
+					SchedulerCluster: &managerv2.SchedulerCluster{
+						Id:           1,
+						Name:         "bas",
+						Config:       []byte{1},
+						ClientConfig: []byte{1},
+					},
+				}, nil).Times(1)
+				m.ListApplications(gomock.Any(), gomock.Any()).Return(&managerv2.ListApplicationsResponse{
+					Applications: []*managerv2.Application{
+						{
+							Id:   1,
+							Name: "foo",
+							Url:  "example.com",
+							Bio:  "bar",
+							Priority: &managerv2.ApplicationPriority{
+								Value: commonv2.Priority_LEVEL1,
+								Urls: []*managerv2.URLPriority{
+									{
+										Regex: "blobs*",
+										Value: commonv2.Priority_LEVEL1,
+									},
+								},
+							},
 						},
 					},
 				}, nil).Times(1)
 			},
 			expect: func(t *testing.T, data *DynconfigData, err error) {
 				assert := assert.New(t)
-				assert.Equal(data.CDNs[0].HostName, "foo")
-				assert.Equal(data.CDNs[0].IP, "127.0.0.1")
-				assert.Equal(data.CDNs[0].Port, int32(8001))
-				assert.Equal(data.CDNs[0].DownloadPort, int32(8003))
+				assert.EqualValues(data, &DynconfigData{
+					Scheduler: &managerv2.Scheduler{
+						Id:       1,
+						Hostname: "foo",
+						Idc:      "idc",
+						Location: "location",
+						Ip:       "127.0.0.1",
+						Port:     8002,
+						State:    "active",
+						SeedPeers: []*managerv2.SeedPeer{
+							{
+								Id:           1,
+								Hostname:     "bar",
+								Type:         types.HostTypeStrongSeedName,
+								Idc:          "idc",
+								Location:     "location",
+								Ip:           "127.0.0.1",
+								Port:         8001,
+								DownloadPort: 8003,
+								SeedPeerCluster: &managerv2.SeedPeerCluster{
+									Id:     1,
+									Name:   "baz",
+									Config: []byte{1},
+								},
+							},
+						},
+						SchedulerCluster: &managerv2.SchedulerCluster{
+							Id:           1,
+							Name:         "bas",
+							Config:       []byte{1},
+							ClientConfig: []byte{1},
+						},
+					},
+					Applications: []*managerv2.Application{
+						{
+							Id:   1,
+							Name: "foo",
+							Url:  "example.com",
+							Bio:  "bar",
+							Priority: &managerv2.ApplicationPriority{
+								Value: commonv2.Priority_LEVEL1,
+								Urls: []*managerv2.URLPriority{
+									{
+										Regex: "blobs*",
+										Value: commonv2.Priority_LEVEL1,
+									},
+								},
+							},
+						},
+					},
+				})
 			},
 		},
 		{
-			name:   "client failed to return for the second time",
-			expire: 10 * time.Millisecond,
+			name:            "get scheduler error",
+			refreshInterval: 10 * time.Millisecond,
 			cleanFileCache: func(t *testing.T) {
-				if err := os.Remove(DefaultDynconfigCachePath); err != nil {
+				if err := os.Remove(mockCachePath); err != nil {
 					t.Fatal(err)
 				}
 			},
 			sleep: func() {
 				time.Sleep(100 * time.Millisecond)
 			},
-			mock: func(m *mocks.MockClientMockRecorder) {
+			mock: func(m *mocks.MockV2MockRecorder) {
 				gomock.InOrder(
-					m.GetScheduler(gomock.Any()).Return(&manager.Scheduler{
-						Cdns: []*manager.CDN{
+					m.GetScheduler(gomock.Any(), gomock.Any()).Return(&managerv2.Scheduler{
+						Id:       1,
+						Hostname: "foo",
+						Idc:      "idc",
+						Location: "location",
+						Ip:       "127.0.0.1",
+						Port:     8002,
+						State:    "active",
+						SeedPeers: []*managerv2.SeedPeer{
 							{
-								HostName:     "foo",
+								Id:           1,
+								Hostname:     "bar",
+								Type:         types.HostTypeSuperSeedName,
+								Idc:          "idc",
+								Location:     "location",
 								Ip:           "127.0.0.1",
 								Port:         8001,
 								DownloadPort: 8003,
+								SeedPeerCluster: &managerv2.SeedPeerCluster{
+									Id:     1,
+									Name:   "baz",
+									Config: []byte{1},
+								},
+							},
+						},
+						SchedulerCluster: &managerv2.SchedulerCluster{
+							Id:           1,
+							Name:         "bas",
+							Config:       []byte{1},
+							ClientConfig: []byte{1},
+						},
+					}, nil).Times(1),
+					m.ListApplications(gomock.Any(), gomock.Any()).Return(&managerv2.ListApplicationsResponse{
+						Applications: []*managerv2.Application{
+							{
+								Id:   1,
+								Name: "foo",
+								Url:  "example.com",
+								Bio:  "bar",
+								Priority: &managerv2.ApplicationPriority{
+									Value: commonv2.Priority_LEVEL1,
+									Urls: []*managerv2.URLPriority{
+										{
+											Regex: "blobs*",
+											Value: commonv2.Priority_LEVEL1,
+										},
+									},
+								},
 							},
 						},
 					}, nil).Times(1),
-					m.GetScheduler(gomock.Any()).Return(nil, errors.New("foo")).Times(1),
+					m.GetScheduler(gomock.Any(), gomock.Any()).Return(nil, errors.New("foo")).Times(1),
 				)
 			},
 			expect: func(t *testing.T, data *DynconfigData, err error) {
 				assert := assert.New(t)
-				assert.Equal(data.CDNs[0].HostName, "foo")
-				assert.Equal(data.CDNs[0].IP, "127.0.0.1")
-				assert.Equal(data.CDNs[0].Port, int32(8001))
-				assert.Equal(data.CDNs[0].DownloadPort, int32(8003))
+				assert.EqualValues(data, &DynconfigData{
+					Scheduler: &managerv2.Scheduler{
+						Id:       1,
+						Hostname: "foo",
+						Idc:      "idc",
+						Location: "location",
+						Ip:       "127.0.0.1",
+						Port:     8002,
+						State:    "active",
+						SeedPeers: []*managerv2.SeedPeer{
+							{
+								Id:           1,
+								Hostname:     "bar",
+								Type:         types.HostTypeSuperSeedName,
+								Idc:          "idc",
+								Location:     "location",
+								Ip:           "127.0.0.1",
+								Port:         8001,
+								DownloadPort: 8003,
+								SeedPeerCluster: &managerv2.SeedPeerCluster{
+									Id:     1,
+									Name:   "baz",
+									Config: []byte{1},
+								},
+							},
+						},
+						SchedulerCluster: &managerv2.SchedulerCluster{
+							Id:           1,
+							Name:         "bas",
+							Config:       []byte{1},
+							ClientConfig: []byte{1},
+						},
+					},
+					Applications: []*managerv2.Application{
+						{
+							Id:   1,
+							Name: "foo",
+							Url:  "example.com",
+							Bio:  "bar",
+							Priority: &managerv2.ApplicationPriority{
+								Value: commonv2.Priority_LEVEL1,
+								Urls: []*managerv2.URLPriority{
+									{
+										Regex: "blobs*",
+										Value: commonv2.Priority_LEVEL1,
+									},
+								},
+							},
+						},
+					},
+				})
+			},
+		},
+		{
+			name:            "list application error",
+			refreshInterval: 10 * time.Millisecond,
+			cleanFileCache: func(t *testing.T) {
+				if err := os.Remove(mockCachePath); err != nil {
+					t.Fatal(err)
+				}
+			},
+			sleep: func() {
+				time.Sleep(100 * time.Millisecond)
+			},
+			mock: func(m *mocks.MockV2MockRecorder) {
+				gomock.InOrder(
+					m.GetScheduler(gomock.Any(), gomock.Any()).Return(&managerv2.Scheduler{
+						Id:       1,
+						Hostname: "foo",
+						Idc:      "idc",
+						Location: "location",
+						Ip:       "127.0.0.1",
+						Port:     8002,
+						State:    "active",
+						SeedPeers: []*managerv2.SeedPeer{
+							{
+								Id:           1,
+								Hostname:     "bar",
+								Type:         types.HostTypeSuperSeedName,
+								Idc:          "idc",
+								Location:     "location",
+								Ip:           "127.0.0.1",
+								Port:         8001,
+								DownloadPort: 8003,
+								SeedPeerCluster: &managerv2.SeedPeerCluster{
+									Id:     1,
+									Name:   "baz",
+									Config: []byte{1},
+								},
+							},
+						},
+						SchedulerCluster: &managerv2.SchedulerCluster{
+							Id:           1,
+							Name:         "bas",
+							Config:       []byte{1},
+							ClientConfig: []byte{1},
+						},
+					}, nil).Times(1),
+					m.ListApplications(gomock.Any(), gomock.Any()).Return(&managerv2.ListApplicationsResponse{
+						Applications: []*managerv2.Application{
+							{
+								Id:   1,
+								Name: "foo",
+								Url:  "example.com",
+								Bio:  "bar",
+								Priority: &managerv2.ApplicationPriority{
+									Value: commonv2.Priority_LEVEL1,
+									Urls: []*managerv2.URLPriority{
+										{
+											Regex: "blobs*",
+											Value: commonv2.Priority_LEVEL1,
+										},
+									},
+								},
+							},
+						},
+					}, nil).Times(1),
+					m.GetScheduler(gomock.Any(), gomock.Any()).Return(&managerv2.Scheduler{
+						Id:       1,
+						Hostname: "foo",
+						Idc:      "idc",
+						Location: "location",
+						Ip:       "127.0.0.1",
+						Port:     8002,
+						State:    "active",
+						SeedPeers: []*managerv2.SeedPeer{
+							{
+								Id:           1,
+								Hostname:     "bar",
+								Type:         types.HostTypeSuperSeedName,
+								Idc:          "idc",
+								Location:     "location",
+								Ip:           "127.0.0.1",
+								Port:         8001,
+								DownloadPort: 8003,
+								SeedPeerCluster: &managerv2.SeedPeerCluster{
+									Id:     1,
+									Name:   "baz",
+									Config: []byte{1},
+								},
+							},
+						},
+						SchedulerCluster: &managerv2.SchedulerCluster{
+							Id:           1,
+							Name:         "bas",
+							Config:       []byte{1},
+							ClientConfig: []byte{1},
+						},
+					}, nil).Times(1),
+					m.ListApplications(gomock.Any(), gomock.Any()).Return(nil, errors.New("foo")).Times(1),
+				)
+			},
+			expect: func(t *testing.T, data *DynconfigData, err error) {
+				assert := assert.New(t)
+				assert.EqualValues(data, &DynconfigData{
+					Scheduler: &managerv2.Scheduler{
+						Id:       1,
+						Hostname: "foo",
+						Idc:      "idc",
+						Location: "location",
+						Ip:       "127.0.0.1",
+						Port:     8002,
+						State:    "active",
+						SeedPeers: []*managerv2.SeedPeer{
+							{
+								Id:           1,
+								Hostname:     "bar",
+								Type:         types.HostTypeSuperSeedName,
+								Idc:          "idc",
+								Location:     "location",
+								Ip:           "127.0.0.1",
+								Port:         8001,
+								DownloadPort: 8003,
+								SeedPeerCluster: &managerv2.SeedPeerCluster{
+									Id:     1,
+									Name:   "baz",
+									Config: []byte{1},
+								},
+							},
+						},
+						SchedulerCluster: &managerv2.SchedulerCluster{
+							Id:           1,
+							Name:         "bas",
+							Config:       []byte{1},
+							ClientConfig: []byte{1},
+						},
+					},
+					Applications: []*managerv2.Application{
+						{
+							Id:   1,
+							Name: "foo",
+							Url:  "example.com",
+							Bio:  "bar",
+							Priority: &managerv2.ApplicationPriority{
+								Value: commonv2.Priority_LEVEL1,
+								Urls: []*managerv2.URLPriority{
+									{
+										Regex: "blobs*",
+										Value: commonv2.Priority_LEVEL1,
+									},
+								},
+							},
+						},
+					},
+				})
 			},
 		},
 	}
@@ -109,14 +453,11 @@ func TestDynconfigGet_ManagerSourceType(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := gomock.NewController(t)
 			defer ctl.Finish()
-			mockManagerClient := mocks.NewMockClient(ctl)
+			mockManagerClient := mocks.NewMockV2(ctl)
 			tc.mock(mockManagerClient.EXPECT())
 
-			d, err := NewDynconfig(dc.ManagerSourceType, "", []dc.Option{
-				dc.WithManagerClient(NewManagerClient(mockManagerClient, uint(1))),
-				dc.WithCachePath(DefaultDynconfigCachePath),
-				dc.WithExpireTime(tc.expire),
-			}...)
+			mockConfig.DynConfig.RefreshInterval = tc.refreshInterval
+			d, err := NewDynconfig(mockManagerClient, mockCacheDir, mockConfig, WithTransportCredentials(nil))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -125,121 +466,6 @@ func TestDynconfigGet_ManagerSourceType(t *testing.T) {
 			data, err := d.Get()
 			tc.expect(t, data, err)
 			tc.cleanFileCache(t)
-		})
-	}
-}
-
-func TestDynconfigGet_LocalSourceType(t *testing.T) {
-	tests := []struct {
-		name       string
-		configPath string
-		expect     func(t *testing.T, data *DynconfigData, err error)
-	}{
-		{
-			name:       "get CDN from local config",
-			configPath: filepath.Join("./testdata", "dynconfig", "scheduler.yaml"),
-			expect: func(t *testing.T, data *DynconfigData, err error) {
-				assert := assert.New(t)
-				assert.Equal(
-					&DynconfigData{
-						CDNs: []*CDN{
-							{
-								HostName:     "foo",
-								IP:           "127.0.0.1",
-								Port:         8001,
-								DownloadPort: 8003,
-							},
-							{
-								HostName:     "bar",
-								IP:           "127.0.0.1",
-								Port:         8001,
-								DownloadPort: 8003,
-							},
-						},
-					}, data)
-			},
-		},
-		{
-			name:       "directory does not exist",
-			configPath: filepath.Join("./testdata", "foo"),
-			expect: func(t *testing.T, data *DynconfigData, err error) {
-				assert := assert.New(t)
-				assert.EqualError(err, "open testdata/foo: no such file or directory")
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			d, err := NewDynconfig(dc.LocalSourceType, "", dc.WithLocalConfigPath(tc.configPath))
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			data, err := d.Get()
-			tc.expect(t, data, err)
-		})
-	}
-}
-
-func TestDynconfigGetCDNFromDirPath(t *testing.T) {
-	tests := []struct {
-		name       string
-		cdnDirPath string
-		expect     func(t *testing.T, data *DynconfigData, err error)
-	}{
-		{
-			name:       "get CDN from directory",
-			cdnDirPath: filepath.Join("./testdata", "dynconfig", "cdn"),
-			expect: func(t *testing.T, data *DynconfigData, err error) {
-				assert := assert.New(t)
-				assert.Equal(true, reflect.DeepEqual(
-					&DynconfigData{
-						CDNs: []*CDN{
-							{
-								HostName:      "foo",
-								IP:            "127.0.0.1",
-								Port:          8001,
-								DownloadPort:  8003,
-								SecurityGroup: "",
-								Location:      "foo",
-								IDC:           "foo",
-								NetTopology:   "",
-							},
-							{
-								HostName:      "bar",
-								IP:            "127.0.0.1",
-								Port:          8001,
-								DownloadPort:  8003,
-								SecurityGroup: "",
-								Location:      "bar",
-								IDC:           "bar",
-								NetTopology:   "",
-							},
-						},
-					}, data))
-			},
-		},
-		{
-			name:       "directory does not exist",
-			cdnDirPath: filepath.Join("./testdata", "foo"),
-			expect: func(t *testing.T, data *DynconfigData, err error) {
-				assert := assert.New(t)
-				assert.EqualError(err, "open testdata/foo: no such file or directory")
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-
-			d, err := NewDynconfig(dc.LocalSourceType, tc.cdnDirPath, dc.WithLocalConfigPath("./testdata/scheduler.yaml"))
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			data, err := d.Get()
-			tc.expect(t, data, err)
 		})
 	}
 }

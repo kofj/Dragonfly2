@@ -1,4 +1,4 @@
-// +build darwin
+//go:build darwin
 
 /*
  *     Copyright 2020 The Dragonfly Authors
@@ -18,24 +18,33 @@
 
 package config
 
-import "d7y.io/dragonfly/v2/pkg/unit"
+import (
+	"golang.org/x/time/rate"
+
+	"d7y.io/dragonfly/v2/client/util"
+	"d7y.io/dragonfly/v2/pkg/unit"
+)
 
 var dfgetConfig = ClientOption{
-	URL:               "",
-	Output:            "",
-	Timeout:           0,
-	BenchmarkRate:     128 * unit.KB,
-	RateLimit:         0,
+	URL:           "",
+	Output:        "",
+	Timeout:       0,
+	BenchmarkRate: 128 * unit.KB,
+	RateLimit: util.RateLimit{
+		Limit: rate.Limit(DefaultTotalDownloadLimit),
+	},
 	Md5:               "",
 	DigestMethod:      "",
 	DigestValue:       "",
 	Tag:               "",
-	CallSystem:        "",
-	Pattern:           "",
+	Application:       "",
+	Priority:          0,
 	Cacerts:           nil,
 	Filter:            "",
 	Header:            nil,
 	DisableBackSource: false,
 	Insecure:          false,
 	ShowProgress:      false,
+	Recursive:         false,
+	RecursiveLevel:    5,
 }

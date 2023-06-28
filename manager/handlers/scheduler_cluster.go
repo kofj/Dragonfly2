@@ -19,17 +19,20 @@ package handlers
 import (
 	"net/http"
 
-	"d7y.io/dragonfly/v2/manager/types"
 	"github.com/gin-gonic/gin"
+
+	// nolint
+	_ "d7y.io/dragonfly/v2/manager/models"
+	"d7y.io/dragonfly/v2/manager/types"
 )
 
 // @Summary Create SchedulerCluster
-// @Description create by json config
+// @Description Create by json config
 // @Tags SchedulerCluster
 // @Accept json
 // @Produce json
 // @Param SchedulerCluster body types.CreateSchedulerClusterRequest true "SchedulerCluster"
-// @Success 200 {object} model.SchedulerCluster
+// @Success 200 {object} models.SchedulerCluster
 // @Failure 400
 // @Failure 404
 // @Failure 500
@@ -41,20 +44,9 @@ func (h *Handlers) CreateSchedulerCluster(ctx *gin.Context) {
 		return
 	}
 
-	if json.SecurityGroupDomain != "" {
-		scheduler, err := h.service.CreateSchedulerClusterWithSecurityGroupDomain(json)
-		if err != nil {
-			ctx.Error(err)
-			return
-		}
-
-		ctx.JSON(http.StatusOK, scheduler)
-		return
-	}
-
-	schedulerCluster, err := h.service.CreateSchedulerCluster(json)
+	schedulerCluster, err := h.service.CreateSchedulerCluster(ctx.Request.Context(), json)
 	if err != nil {
-		ctx.Error(err)
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
@@ -79,8 +71,8 @@ func (h *Handlers) DestroySchedulerCluster(ctx *gin.Context) {
 		return
 	}
 
-	if err := h.service.DestroySchedulerCluster(params.ID); err != nil {
-		ctx.Error(err)
+	if err := h.service.DestroySchedulerCluster(ctx.Request.Context(), params.ID); err != nil {
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
@@ -94,7 +86,7 @@ func (h *Handlers) DestroySchedulerCluster(ctx *gin.Context) {
 // @Produce json
 // @Param id path string true "id"
 // @Param SchedulerCluster body types.UpdateSchedulerClusterRequest true "SchedulerCluster"
-// @Success 200 {object} model.SchedulerCluster
+// @Success 200 {object} models.SchedulerCluster
 // @Failure 400
 // @Failure 404
 // @Failure 500
@@ -102,30 +94,19 @@ func (h *Handlers) DestroySchedulerCluster(ctx *gin.Context) {
 func (h *Handlers) UpdateSchedulerCluster(ctx *gin.Context) {
 	var params types.SchedulerClusterParams
 	if err := ctx.ShouldBindUri(&params); err != nil {
-		ctx.Error(err)
+		ctx.JSON(http.StatusUnprocessableEntity, gin.H{"errors": err.Error()})
 		return
 	}
 
 	var json types.UpdateSchedulerClusterRequest
 	if err := ctx.ShouldBindJSON(&json); err != nil {
-		ctx.Error(err)
+		ctx.JSON(http.StatusUnprocessableEntity, gin.H{"errors": err.Error()})
 		return
 	}
 
-	if json.SecurityGroupDomain != "" {
-		scheduler, err := h.service.UpdateSchedulerClusterWithSecurityGroupDomain(params.ID, json)
-		if err != nil {
-			ctx.Error(err)
-			return
-		}
-
-		ctx.JSON(http.StatusOK, scheduler)
-		return
-	}
-
-	schedulerCluster, err := h.service.UpdateSchedulerCluster(params.ID, json)
+	schedulerCluster, err := h.service.UpdateSchedulerCluster(ctx.Request.Context(), params.ID, json)
 	if err != nil {
-		ctx.Error(err)
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
@@ -138,7 +119,7 @@ func (h *Handlers) UpdateSchedulerCluster(ctx *gin.Context) {
 // @Accept json
 // @Produce json
 // @Param id path string true "id"
-// @Success 200 {object} model.SchedulerCluster
+// @Success 200 {object} models.SchedulerCluster
 // @Failure 400
 // @Failure 404
 // @Failure 500
@@ -150,9 +131,9 @@ func (h *Handlers) GetSchedulerCluster(ctx *gin.Context) {
 		return
 	}
 
-	schedulerCluster, err := h.service.GetSchedulerCluster(params.ID)
+	schedulerCluster, err := h.service.GetSchedulerCluster(ctx.Request.Context(), params.ID)
 	if err != nil {
-		ctx.Error(err)
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
@@ -166,7 +147,7 @@ func (h *Handlers) GetSchedulerCluster(ctx *gin.Context) {
 // @Produce json
 // @Param page query int true "current page" default(0)
 // @Param per_page query int true "return max item count, default 10, max 50" default(10) minimum(2) maximum(50)
-// @Success 200 {object} []model.SchedulerCluster
+// @Success 200 {object} []models.SchedulerCluster
 // @Failure 400
 // @Failure 404
 // @Failure 500
@@ -179,19 +160,13 @@ func (h *Handlers) GetSchedulerClusters(ctx *gin.Context) {
 	}
 
 	h.setPaginationDefault(&query.Page, &query.PerPage)
-	schedulerClusters, err := h.service.GetSchedulerClusters(query)
+	schedulerClusters, count, err := h.service.GetSchedulerClusters(ctx.Request.Context(), query)
 	if err != nil {
-		ctx.Error(err)
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
-	totalCount, err := h.service.SchedulerClusterTotalCount(query)
-	if err != nil {
-		ctx.Error(err)
-		return
-	}
-
-	h.setPaginationLinkHeader(ctx, query.Page, query.PerPage, int(totalCount))
+	h.setPaginationLinkHeader(ctx, query.Page, query.PerPage, int(count))
 	ctx.JSON(http.StatusOK, schedulerClusters)
 }
 
@@ -214,9 +189,9 @@ func (h *Handlers) AddSchedulerToSchedulerCluster(ctx *gin.Context) {
 		return
 	}
 
-	err := h.service.AddSchedulerToSchedulerCluster(params.ID, params.SchedulerID)
+	err := h.service.AddSchedulerToSchedulerCluster(ctx.Request.Context(), params.ID, params.SchedulerID)
 	if err != nil {
-		ctx.Error(err)
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 

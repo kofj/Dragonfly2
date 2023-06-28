@@ -17,16 +17,20 @@
 package middlewares
 
 import (
+	"errors"
 	"net/http"
 
-	"d7y.io/dragonfly/v2/internal/dfcodes"
-	"d7y.io/dragonfly/v2/internal/dferrors"
 	"github.com/VividCortex/mysqlerr"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/go-sql-driver/mysql"
-	"github.com/pkg/errors"
+	redigo "github.com/gomodule/redigo/redis"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
+
+	commonv1 "d7y.io/api/pkg/apis/common/v1"
+
+	"d7y.io/dragonfly/v2/internal/dferrors"
 )
 
 type ErrorResponse struct {
@@ -43,10 +47,20 @@ func Error() gin.HandlerFunc {
 			return
 		}
 
+		// Redigo error handler
+		if errors.Is(err, redigo.ErrNil) {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Message: http.StatusText(http.StatusNotFound),
+			})
+			c.Abort()
+			return
+		}
+
 		// RPC error handler
-		if err, ok := errors.Cause(err.Err).(*dferrors.DfError); ok {
-			switch err.Code {
-			case dfcodes.InvalidResourceType:
+		var dferr *dferrors.DfError
+		if errors.As(err.Err, &dferr) {
+			switch dferr.Code {
+			case commonv1.Code_InvalidResourceType:
 				c.JSON(http.StatusBadRequest, ErrorResponse{
 					Message: http.StatusText(http.StatusBadRequest),
 				})
@@ -80,8 +94,9 @@ func Error() gin.HandlerFunc {
 		}
 
 		// Mysql error handler
-		if err, ok := errors.Cause(err.Err).(*mysql.MySQLError); ok {
-			switch err.Number {
+		var merr *mysql.MySQLError
+		if errors.As(err.Err, &merr) {
+			switch merr.Number {
 			case mysqlerr.ER_DUP_ENTRY:
 				c.JSON(http.StatusConflict, ErrorResponse{
 					Message: http.StatusText(http.StatusConflict),
@@ -97,7 +112,17 @@ func Error() gin.HandlerFunc {
 			}
 		}
 
+		if errors.Is(err.Err, redis.Nil) {
+			c.JSON(http.StatusNotFound, ErrorResponse{
+				Message: http.StatusText(http.StatusNotFound),
+			})
+			c.Abort()
+			return
+		}
+
 		// Unknown error
-		c.JSON(http.StatusInternalServerError, nil)
+		c.JSON(http.StatusInternalServerError, ErrorResponse{
+			Message: err.Err.Error(),
+		})
 	}
 }

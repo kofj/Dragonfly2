@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
@@ -31,32 +30,29 @@ import (
 	testifyassert "github.com/stretchr/testify/assert"
 	"golang.org/x/time/rate"
 
+	"d7y.io/dragonfly/v2/client/config"
 	"d7y.io/dragonfly/v2/client/daemon/storage"
+	"d7y.io/dragonfly/v2/client/daemon/storage/mocks"
 	"d7y.io/dragonfly/v2/client/daemon/test"
-	mock_storage "d7y.io/dragonfly/v2/client/daemon/test/mock/storage"
 	_ "d7y.io/dragonfly/v2/pkg/rpc/dfdaemon/server"
 )
-
-func TestMain(m *testing.M) {
-	os.Exit(m.Run())
-}
 
 func TestUploadManager_Serve(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
 	assert := testifyassert.New(t)
-	testData, err := ioutil.ReadFile(test.File)
+	testData, err := os.ReadFile(test.File)
 	assert.Nil(err, "load test file")
 
-	mockStorageManager := mock_storage.NewMockManager(ctrl)
+	mockStorageManager := mocks.NewMockManager(ctrl)
 	mockStorageManager.EXPECT().ReadPiece(gomock.Any(), gomock.Any()).AnyTimes().
 		DoAndReturn(func(ctx context.Context, req *storage.ReadPieceRequest) (io.Reader, io.Closer, error) {
 			return bytes.NewBuffer(testData[req.Range.Start : req.Range.Start+req.Range.Length]),
-				ioutil.NopCloser(nil), nil
+				io.NopCloser(nil), nil
 		})
 
-	um, err := NewUploadManager(mockStorageManager, WithLimiter(rate.NewLimiter(16*1024, 16*1024)))
+	um, err := NewUploadManager(config.NewDaemonConfig(), mockStorageManager, os.TempDir(), WithLimiter(rate.NewLimiter(16*1024, 16*1024)))
 	assert.Nil(err, "NewUploadManager")
 
 	listen, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -64,7 +60,9 @@ func TestUploadManager_Serve(t *testing.T) {
 	addr := listen.Addr().String()
 
 	go func() {
-		um.Serve(listen)
+		if err := um.Serve(listen); err != nil {
+			t.Error(err)
+		}
 	}()
 
 	tests := []struct {
@@ -95,13 +93,13 @@ func TestUploadManager_Serve(t *testing.T) {
 
 	for _, tt := range tests {
 		req, _ := http.NewRequest(http.MethodGet,
-			fmt.Sprintf("http://%s%s%s/%s?peerId=%s", addr, PeerDownloadHTTPPathPrefix, "666", tt.taskID, tt.peerID), nil)
+			fmt.Sprintf("http://%s/%s/%s/%s?peerId=%s", addr, "download", "666", tt.taskID, tt.peerID), nil)
 		req.Header.Add("Range", tt.pieceRange)
 
 		resp, err := http.DefaultClient.Do(req)
 		assert.Nil(err, "get piece data")
 
-		data, _ := ioutil.ReadAll(resp.Body)
+		data, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		assert.Equal(tt.targetPieceData, data)
 	}

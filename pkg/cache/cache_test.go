@@ -18,7 +18,7 @@ package cache
 
 import (
 	"bytes"
-	"io/ioutil"
+	"os"
 	"runtime"
 	"strconv"
 	"sync"
@@ -94,19 +94,19 @@ func TestCache(t *testing.T) {
 func TestCacheTimes(t *testing.T) {
 	var found bool
 
-	tc := New(50*time.Millisecond, 1*time.Millisecond)
+	tc := New(100*time.Millisecond, 1*time.Millisecond)
 	tc.Set("a", 1, DefaultExpiration)
 	tc.Set("b", 2, NoExpiration)
-	tc.Set("c", 3, 20*time.Millisecond)
-	tc.Set("d", 4, 70*time.Millisecond)
+	tc.Set("c", 3, 40*time.Millisecond)
+	tc.Set("d", 4, 140*time.Millisecond)
 
-	<-time.After(25 * time.Millisecond)
+	<-time.After(50 * time.Millisecond)
 	_, found = tc.Get("c")
 	if found {
 		t.Error("Found c when it should have been automatically deleted")
 	}
 
-	<-time.After(30 * time.Millisecond)
+	<-time.After(80 * time.Millisecond)
 	_, found = tc.Get("a")
 	if found {
 		t.Error("Found a when it should have been automatically deleted")
@@ -122,7 +122,7 @@ func TestCacheTimes(t *testing.T) {
 		t.Error("Did not find d even though it was set to expire later than the default")
 	}
 
-	<-time.After(20 * time.Millisecond)
+	<-time.After(40 * time.Millisecond)
 	_, found = tc.Get("d")
 	if found {
 		t.Error("Found d when it should have been automatically deleted (later than the default)")
@@ -220,7 +220,7 @@ func TestOnEvicted(t *testing.T) {
 	tc := New(DefaultExpiration, 0)
 	tc.Set(v1, 3, DefaultExpiration)
 	works := false
-	tc.OnEvicted(func(k string, v interface{}) {
+	tc.OnEvicted(func(k string, v any) {
 		if k == v1 && v.(int) == 3 {
 			works = true
 		}
@@ -324,26 +324,39 @@ func testFillAndSerialize(t *testing.T, tc Cache) {
 
 func TestFileSerialization(t *testing.T) {
 	tc := New(DefaultExpiration, 0)
-	tc.Add("a", "a", DefaultExpiration)
-	tc.Add("b", "b", DefaultExpiration)
-	f, err := ioutil.TempFile("", "go-cache-cache.dat")
+	if err := tc.Add("a", "a", DefaultExpiration); err != nil {
+		t.Error(err)
+	}
+	if err := tc.Add("b", "b", DefaultExpiration); err != nil {
+		t.Error(err)
+	}
+
+	f, err := os.CreateTemp("", "go-cache-cache.dat")
 	if err != nil {
 		t.Fatal("Couldn't create cache file:", err)
 	}
 	fname := f.Name()
 	f.Close()
-	tc.SaveFile(fname)
+
+	if err := tc.SaveFile(fname); err != nil {
+		t.Fatal(err)
+	}
 
 	oc := New(DefaultExpiration, 0)
-	oc.Add("a", "aa", 0) // this should not be overwritten
-	err = oc.LoadFile(fname)
-	if err != nil {
+	// this should not be overwritten
+	if err := oc.Add("a", "aa", 0); err != nil {
 		t.Error(err)
 	}
+
+	if err := oc.LoadFile(fname); err != nil {
+		t.Fatal(err)
+	}
+
 	a, found := oc.Get("a")
 	if !found {
 		t.Error("a was not found")
 	}
+
 	astr := a.(string)
 	if astr != "aa" {
 		if astr == "a" {
@@ -352,10 +365,12 @@ func TestFileSerialization(t *testing.T) {
 			t.Error("a is not aa")
 		}
 	}
+
 	b, found := oc.Get("b")
 	if !found {
 		t.Error("b was not found")
 	}
+
 	if b.(string) != "b" {
 		t.Error("b is not b")
 	}
@@ -408,7 +423,7 @@ func BenchmarkRWMutexMapGet(b *testing.B) {
 func BenchmarkRWMutexInterfaceMapGetStruct(b *testing.B) {
 	b.StopTimer()
 	s := struct{ name string }{name: v1}
-	m := map[interface{}]string{
+	m := map[any]string{
 		s: v2,
 	}
 	var mu sync.RWMutex
@@ -422,7 +437,7 @@ func BenchmarkRWMutexInterfaceMapGetStruct(b *testing.B) {
 
 func BenchmarkRWMutexInterfaceMapGetString(b *testing.B) {
 	b.StopTimer()
-	m := map[interface{}]string{
+	m := map[any]string{
 		v1: v2,
 	}
 	var mu sync.RWMutex

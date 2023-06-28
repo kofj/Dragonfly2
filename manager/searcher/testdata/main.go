@@ -17,35 +17,29 @@
 package main
 
 import (
-	"flag"
+	"context"
 	"fmt"
 	"os"
 
-	"d7y.io/dragonfly/v2/internal/dfpath"
-	"d7y.io/dragonfly/v2/manager/model"
+	logger "d7y.io/dragonfly/v2/internal/dflog"
+	"d7y.io/dragonfly/v2/manager/models"
 	"d7y.io/dragonfly/v2/manager/searcher"
 )
 
-func init() {
-	flag.StringVar(&dfpath.PluginsDir, "plugin-dir", ".", "")
-}
-
 func main() {
-	flag.Parse()
-
-	s, err := searcher.LoadPlugin()
+	s, err := searcher.LoadPlugin("./testdata")
 	if err != nil {
 		fmt.Printf("load plugin error: %s\n", err)
 		os.Exit(1)
 	}
 
-	cluster, ok := s.FindSchedulerCluster([]model.SchedulerCluster{}, map[string]string{})
-	if !ok {
+	clusters, err := s.FindSchedulerClusters(context.Background(), []models.SchedulerCluster{}, "127.0.0.1", "foo", map[string]string{}, logger.CoreLogger)
+	if err != nil {
 		fmt.Println("scheduler cluster not found")
 		os.Exit(1)
 	}
 
-	if cluster.Name != "foo" {
+	if clusters[0].Name != "foo" {
 		fmt.Println("scheduler cluster name wrong")
 		os.Exit(1)
 	}

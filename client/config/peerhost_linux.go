@@ -1,4 +1,4 @@
-// +build linux
+//go:build linux
 
 /*
  *     Copyright 2020 The Dragonfly Authors
@@ -19,109 +19,171 @@
 package config
 
 import (
-	"net"
 	"time"
 
 	"golang.org/x/time/rate"
 
-	"d7y.io/dragonfly/v2/client/clientutil"
-	"d7y.io/dragonfly/v2/pkg/basic"
-	"d7y.io/dragonfly/v2/pkg/basic/dfnet"
-	"d7y.io/dragonfly/v2/pkg/util/net/iputils"
+	"d7y.io/dragonfly/v2/client/util"
+	"d7y.io/dragonfly/v2/pkg/net/fqdn"
+	"d7y.io/dragonfly/v2/pkg/rpc"
+	"d7y.io/dragonfly/v2/pkg/types"
 )
 
-var (
-	PeerHostConfigPath = "/etc/dragonfly/dfget-daemon.yaml"
-
-	peerHostWorkHome = basic.HomeDir + "/.dragonfly/dfget-daemon/"
-	peerHostDataDir  = peerHostWorkHome
-)
-
-var peerHostConfig = DaemonOption{
-	DataDir:     peerHostDataDir,
-	WorkHome:    peerHostWorkHome,
-	AliveTime:   clientutil.Duration{Duration: DefaultDaemonAliveTime},
-	GCInterval:  clientutil.Duration{Duration: DefaultGCInterval},
-	KeepStorage: false,
-	Scheduler: SchedulerOption{
-		NetAddrs: []dfnet.NetAddr{
-			{
-				Type: dfnet.TCP,
-				Addr: "127.0.0.1:8002",
+var peerHostConfig = func() *DaemonOption {
+	return &DaemonOption{
+		AliveTime:   util.Duration{Duration: DefaultDaemonAliveTime},
+		GCInterval:  util.Duration{Duration: DefaultGCInterval},
+		KeepStorage: false,
+		Scheduler: SchedulerOption{
+			Manager: ManagerOption{
+				Enable:          false,
+				RefreshInterval: 10 * time.Minute,
+				SeedPeer: SeedPeerOption{
+					Enable:    false,
+					Type:      types.HostTypeSuperSeedName,
+					ClusterID: 1,
+					KeepAlive: KeepAliveOption{
+						Interval: 5 * time.Second,
+					},
+				},
 			},
+			ScheduleTimeout: util.Duration{Duration: DefaultScheduleTimeout},
 		},
-		ScheduleTimeout: clientutil.Duration{Duration: DefaultScheduleTimeout},
-	},
-	Host: HostOption{
-		ListenIP:       "0.0.0.0",
-		AdvertiseIP:    iputils.HostIP,
-		SecurityDomain: "",
-		Location:       "",
-		IDC:            "",
-		NetTopology:    "",
-	},
-	Download: DownloadOption{
-		CalculateDigest:      true,
-		PieceDownloadTimeout: 30 * time.Second,
-		TotalRateLimit: clientutil.RateLimit{
-			Limit: rate.Limit(DefaultTotalDownloadLimit),
+		Host: HostOption{
+			Hostname: fqdn.FQDNHostname,
+			Location: "",
+			IDC:      "",
 		},
-		PerPeerRateLimit: clientutil.RateLimit{
-			Limit: rate.Limit(DefaultPerPeerDownloadLimit),
-		},
-		DownloadGRPC: ListenOption{
-			Security: SecurityOption{
-				Insecure: true,
+		Download: DownloadOption{
+			CalculateDigest:      true,
+			PieceDownloadTimeout: 30 * time.Second,
+			GRPCDialTimeout:      10 * time.Second,
+			GetPiecesMaxRetry:    100,
+			RecursiveConcurrent: RecursiveConcurrent{
+				GoroutineCount: 32,
 			},
-			UnixListen: &UnixListenOption{
-				Socket: "/var/run/dfdaemon.sock",
+			TotalRateLimit: util.RateLimit{
+				Limit: rate.Limit(DefaultTotalDownloadLimit),
 			},
+			PerPeerRateLimit: util.RateLimit{
+				Limit: rate.Limit(DefaultPerPeerDownloadLimit),
+			},
+			DownloadGRPC: ListenOption{
+				Security: SecurityOption{
+					Insecure:  true,
+					TLSVerify: false,
+				},
+				UnixListen: &UnixListenOption{},
+			},
+			PeerGRPC: ListenOption{
+				Security: SecurityOption{
+					Insecure:  true,
+					TLSVerify: true,
+				},
+				TCPListen: &TCPListenOption{
+					PortRange: TCPListenPortRange{
+						Start: DefaultPeerStartPort,
+						End:   DefaultEndPort,
+					},
+				},
+			},
+			SplitRunningTasks: false,
 		},
-		PeerGRPC: ListenOption{
-			Security: SecurityOption{
-				Insecure: true,
+		Upload: UploadOption{
+			RateLimit: util.RateLimit{
+				Limit: rate.Limit(DefaultUploadLimit),
 			},
-			TCPListen: &TCPListenOption{
-				PortRange: TCPListenPortRange{
-					Start: 65000,
-					End:   65535,
+			ListenOption: ListenOption{
+				Security: SecurityOption{
+					Insecure:  true,
+					TLSVerify: false,
+				},
+				TCPListen: &TCPListenOption{
+					PortRange: TCPListenPortRange{
+						Start: DefaultUploadStartPort,
+						End:   DefaultEndPort,
+					},
 				},
 			},
 		},
-	},
-	Upload: UploadOption{
-		RateLimit: clientutil.RateLimit{
-			Limit: rate.Limit(DefaultUploadLimit),
-		},
-		ListenOption: ListenOption{
-			Security: SecurityOption{
-				Insecure: true,
-			},
-			TCPListen: &TCPListenOption{
-				Listen: net.IPv4zero.String(),
-				PortRange: TCPListenPortRange{
-					Start: 65002,
-					End:   65535,
+		ObjectStorage: ObjectStorageOption{
+			Enable:      false,
+			Filter:      "Expires&Signature&ns",
+			MaxReplicas: DefaultObjectMaxReplicas,
+			ListenOption: ListenOption{
+				Security: SecurityOption{
+					Insecure:  true,
+					TLSVerify: true,
+				},
+				TCPListen: &TCPListenOption{
+					PortRange: TCPListenPortRange{
+						Start: DefaultObjectStorageStartPort,
+						End:   DefaultEndPort,
+					},
 				},
 			},
 		},
-	},
-	Proxy: &ProxyOption{
-		ListenOption: ListenOption{
-			Security: SecurityOption{
-				Insecure: true,
-			},
-			TCPListen: &TCPListenOption{
-				Listen:    net.IPv4zero.String(),
-				PortRange: TCPListenPortRange{},
+		Proxy: &ProxyOption{
+			ListenOption: ListenOption{
+				Security: SecurityOption{
+					Insecure:  true,
+					TLSVerify: false,
+				},
+				TCPListen: &TCPListenOption{
+					PortRange: TCPListenPortRange{},
+				},
 			},
 		},
-	},
-	Storage: StorageOption{
-		TaskExpireTime: clientutil.Duration{
-			Duration: DefaultTaskExpireTime,
+		Storage: StorageOption{
+			TaskExpireTime: util.Duration{
+				Duration: DefaultTaskExpireTime,
+			},
+			StoreStrategy:          SimpleLocalTaskStoreStrategy,
+			Multiplex:              false,
+			DiskGCThresholdPercent: 95,
 		},
-		StoreStrategy: AdvanceLocalTaskStoreStrategy,
-		Multiplex:     false,
-	},
+		Health: &HealthOption{
+			ListenOption: ListenOption{
+				Security: SecurityOption{
+					Insecure:  true,
+					TLSVerify: false,
+				},
+				TCPListen: &TCPListenOption{
+					PortRange: TCPListenPortRange{
+						Start: DefaultHealthyStartPort,
+						End:   DefaultEndPort,
+					},
+				},
+			},
+			Path: "/server/ping",
+		},
+		Reload: ReloadOption{
+			Interval: util.Duration{
+				Duration: time.Minute,
+			},
+		},
+		Security: GlobalSecurityOption{
+			AutoIssueCert: false,
+			CACert:        types.PEMContent(""),
+			TLSVerify:     false,
+			TLSPolicy:     rpc.DefaultTLSPolicy,
+			CertSpec: &CertSpec{
+				DNSNames:       DefaultCertDNSNames,
+				IPAddresses:    DefaultCertIPAddresses,
+				ValidityPeriod: DefaultCertValidityPeriod,
+			},
+		},
+		Network: &NetworkOption{
+			EnableIPv6: false,
+		},
+		Announcer: AnnouncerOption{
+			SchedulerInterval: DefaultAnnouncerSchedulerInterval,
+		},
+		NetworkTopology: NetworkTopologyOption{
+			Enable: false,
+			Probe: ProbeOption{
+				Interval: DefaultProbeInterval,
+			},
+		},
+	}
 }

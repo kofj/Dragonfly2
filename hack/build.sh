@@ -4,17 +4,20 @@ set -o nounset
 set -o errexit
 set -o pipefail
 
-CDN_BINARY_NAME=cdn
 DFGET_BINARY_NAME=dfget
+DFCACHE_BINARY_NAME=dfcache
+DFSTORE_BINARY_NAME=dfstore
 SCHEDULER_BINARY_NAME=scheduler
 MANAGER_BINARY_NAME=manager
+TRAINER_BINARY_NAME=trainer
 
 PKG=d7y.io/dragonfly/v2
-BUILD_IMAGE=golang:1.16.6-alpine
+BUILD_IMAGE=golang:1.20.1-alpine3.16
 
 VERSION=$(git rev-parse --short HEAD)
 BUILD_TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
+CGO_ENABLED=${CGO_ENABLED:-0}
 GOPROXY=${GOPROXY:-}
 GOTAGS=${GOTAGS:-}
 GOGCFLAGS=${GOGCFLAGS:-}
@@ -24,8 +27,8 @@ GOLDFLAGS="${GOLDFLAGS} -X \"d7y.io/dragonfly/v2/version.Gotags=${GOTAGS:-none}\
 GOLDFLAGS="${GOLDFLAGS} -X \"d7y.io/dragonfly/v2/version.GoVersion=$(go version | grep -o 'go[^ ].*')\""
 GOLDFLAGS="${GOLDFLAGS} -X \"d7y.io/dragonfly/v2/version.Gogcflags=${GOGCFLAGS:-none}\""
 
-curDir=$(cd "$(dirname "$0")" && pwd)
-cd "${curDir}" || return
+CUR_DIR=$(cd "$(dirname "$0")" && pwd)
+cd "${CUR_DIR}" || return
 BUILD_SOURCE_HOME=$(cd ".." && pwd)
 
 . ./env.sh
@@ -47,12 +50,16 @@ build-local() {
     echo "BUILD: $2 in ${BUILD_SOURCE_HOME}/${BUILD_PATH}/$1"
 }
 
-build-cdn-local() {
-    build-local ${CDN_BINARY_NAME} cdn
-}
-
 build-dfget-local() {
     build-local ${DFGET_BINARY_NAME} dfget
+}
+
+build-dfcache-local() {
+    build-local ${DFCACHE_BINARY_NAME} dfcache
+}
+
+build-dfstore-local() {
+    build-local ${DFSTORE_BINARY_NAME} dfstore
 }
 
 build-scheduler-local() {
@@ -61,6 +68,10 @@ build-scheduler-local() {
 
 build-manager-local() {
     build-local ${MANAGER_BINARY_NAME} manager
+}
+
+build-trainer-local() {
+    build-local ${TRAINER_BINARY_NAME} trainer
 }
 
 build-docker() {
@@ -75,7 +86,7 @@ build-docker() {
         -v "$(pwd)"/.cache:/.cache \
         -e GOOS="${GOOS}" \
         -e GOARCH="${GOARCH}" \
-        -e CGO_ENABLED=0 \
+        -e CGO_ENABLED="${CGO_ENABLED}" \
         -e GO111MODULE=on \
         -e GOPROXY="${GOPROXY}" \
         -e GOTAGS="${GOTAGS}" \
@@ -86,12 +97,16 @@ build-docker() {
     echo "BUILD: $1 in ${BUILD_SOURCE_HOME}/${BUILD_PATH}/$1"
 }
 
-build-cdn-docker() {
-    build-docker ${CDN_BINARY_NAME} dfdaemon
-}
-
 build-dfget-docker() {
     build-docker ${DFGET_BINARY_NAME} dfget
+}
+
+build-dfcache-docker() {
+    build-docker ${DFCACHE_BINARY_NAME} dfcache
+}
+
+build-dfstore-docker() {
+    build-docker ${DFSTORE_BINARY_NAME} dfstore
 }
 
 build-scheduler-docker() {
@@ -102,50 +117,88 @@ build-manager-docker() {
     build-docker ${MANAGER_BINARY_NAME} manager
 }
 
+build-manager-console() {
+    set -x
+    CONSOLE_DIR=$(echo $CUR_DIR | sed 's#hack#manager/console#')
+    MANAGER_DIR=$(echo $CUR_DIR | sed 's#hack#manager#')
+    CONSOLE_ASSETS=$CONSOLE_DIR/dist/*
+    MANAGER_ASSETS_DIR=$MANAGER_DIR/dist
+    docker run --workdir=/build \
+        --rm -v ${CONSOLE_DIR}:/build node:12-alpine \
+        sh -c "npm install --loglevel warn --progress false && npm run build"
+    cp -r $CONSOLE_ASSETS $MANAGER_ASSETS_DIR
+}
+
+build-trainer-docker() {
+    build-docker ${TRAINER_BINARY_NAME} trainer
+}
+
 main() {
     create-dirs
     if [[ "1" == "${USE_DOCKER}" ]]; then
         echo "Begin to build with docker."
         case "${1-}" in
-        cdn)
-            build-cdn-docker
-            ;;
         dfget)
             build-dfget-docker
+            ;;
+        dfcache)
+            build-dfcache-docker
+            ;;
+        dfstore)
+            build-dfstore-docker
             ;;
         scheduler)
             build-scheduler-docker
             ;;
+        trainer)
+            build-trainer-docker
+            ;;
         manager)
             build-manager-docker
             ;;
+        manager-console)
+            build-manager-console
+            ;;
         *)
             build-dfget-docker
-            build-cdn-docker
+            build-dfcache-docker
+            build-dfstore-docker
             build-scheduler-docker
             build-manager-docker
+            build-trainer-docker
             ;;
         esac
     else
         echo "Begin to build in the local environment."
         case "${1-}" in
-        cdn)
-            build-cdn-local
-            ;;
         dfget)
             build-dfget-local
+            ;;
+        dfcache)
+            build-dfcache-local
+            ;;
+        dfstore)
+            build-dfstore-local
             ;;
         scheduler)
             build-scheduler-local
             ;;
+        trainer)
+            build-trainer-local
+            ;;
         manager)
             build-manager-local
             ;;
+        manager-console)
+            build-manager-console
+            ;;
         *)
             build-dfget-local
-            build-cdn-local
+            build-dfcache-local
+            build-dfstore-local
             build-scheduler-local
             build-manager-local
+            build-trainer-local
             ;;
         esac
     fi

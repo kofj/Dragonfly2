@@ -22,14 +22,15 @@ import (
 	"net/http"
 	"regexp"
 
-	managermodel "d7y.io/dragonfly/v2/manager/model"
-	"d7y.io/dragonfly/v2/pkg/util/stringutils"
 	"github.com/casbin/casbin/v2"
 	"github.com/casbin/casbin/v2/model"
 	gormadapter "github.com/casbin/gorm-adapter/v3"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
+
+	managermodels "d7y.io/dragonfly/v2/manager/models"
+	"d7y.io/dragonfly/v2/pkg/strings"
 )
 
 // Syntax for models see https://casbin.org/docs/en/syntax-for-models
@@ -60,8 +61,12 @@ const (
 	ReadAction = "read"
 )
 
+var (
+	apiGroupRegexp = regexp.MustCompile(`^/api/v[0-9]+/([-_a-zA-Z]*)[/.*]*`)
+)
+
 func NewEnforcer(gdb *gorm.DB) (*casbin.Enforcer, error) {
-	adapter, err := gormadapter.NewAdapterByDBWithCustomTable(gdb, &managermodel.CasbinRule{})
+	adapter, err := gormadapter.NewAdapterByDBWithCustomTable(gdb, &managermodels.CasbinRule{})
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +99,7 @@ func InitRBAC(e *casbin.Enforcer, g *gin.Engine, db *gorm.DB) error {
 
 	// Create root user for the first time
 	var rootUserCount int64
-	if err := db.Model(managermodel.User{}).Count(&rootUserCount).Error; err != nil {
+	if err := db.Model(managermodels.User{}).Count(&rootUserCount).Error; err != nil {
 		return err
 	}
 
@@ -104,10 +109,10 @@ func InitRBAC(e *casbin.Enforcer, g *gin.Engine, db *gorm.DB) error {
 			return err
 		}
 
-		rootUser := managermodel.User{
+		rootUser := managermodels.User{
 			EncryptedPassword: string(encryptedPasswordBytes),
 			Name:              "root",
-			State:             managermodel.UserStateEnabled,
+			State:             managermodels.UserStateEnabled,
 		}
 
 		if err := db.Create(&rootUser).Error; err != nil {
@@ -150,7 +155,7 @@ func GetAPIGroupNames(g *gin.Engine) []string {
 			continue
 		}
 
-		if !stringutils.Contains(apiGroupNames, name) {
+		if !strings.Contains(apiGroupNames, name) {
 			apiGroupNames = append(apiGroupNames, name)
 		}
 	}
@@ -159,7 +164,6 @@ func GetAPIGroupNames(g *gin.Engine) []string {
 }
 
 func GetAPIGroupName(path string) (string, error) {
-	apiGroupRegexp := regexp.MustCompile(`^/api/v[0-9]+/([-_a-zA-Z]*)[/.*]*`)
 	matchs := apiGroupRegexp.FindStringSubmatch(path)
 	if len(matchs) != 2 {
 		return "", errors.New("cannot find group name")

@@ -16,8 +16,25 @@
 
 package types
 
+type UpdateUserRequest struct {
+	Email    string `json:"email" binding:"omitempty"`
+	Phone    string `json:"phone" binding:"omitempty"`
+	Avatar   string `json:"avatar" binding:"omitempty"`
+	Location string `json:"location" binding:"omitempty"`
+	BIO      string `json:"bio" binding:"omitempty"`
+}
+
 type UserParams struct {
 	ID uint `uri:"id" binding:"required"`
+}
+
+type GetUsersQuery struct {
+	Name     string `form:"name" binding:"omitempty"`
+	Email    string `form:"email" binding:"omitempty"`
+	Location string `form:"location" binding:"omitempty"`
+	State    string `form:"state" binding:"omitempty"`
+	Page     int    `form:"page" binding:"omitempty,gte=1"`
+	PerPage  int    `form:"per_page" binding:"omitempty,gte=1,lte=50"`
 }
 
 type SignInRequest struct {

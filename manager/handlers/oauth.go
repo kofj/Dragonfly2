@@ -19,17 +19,20 @@ package handlers
 import (
 	"net/http"
 
-	"d7y.io/dragonfly/v2/manager/types"
 	"github.com/gin-gonic/gin"
+
+	// nolint
+	_ "d7y.io/dragonfly/v2/manager/models"
+	"d7y.io/dragonfly/v2/manager/types"
 )
 
 // @Summary Create Oauth
-// @Description create by json config
+// @Description Create by json config
 // @Tags Oauth
 // @Accept json
 // @Produce json
 // @Param Oauth body types.CreateOauthRequest true "Oauth"
-// @Success 200 {object} model.Oauth
+// @Success 200 {object} models.Oauth
 // @Failure 400
 // @Failure 404
 // @Failure 500
@@ -41,9 +44,9 @@ func (h *Handlers) CreateOauth(ctx *gin.Context) {
 		return
 	}
 
-	oauth, err := h.service.CreateOauth(json)
+	oauth, err := h.service.CreateOauth(ctx.Request.Context(), json)
 	if err != nil {
-		ctx.Error(err)
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
@@ -68,8 +71,8 @@ func (h *Handlers) DestroyOauth(ctx *gin.Context) {
 		return
 	}
 
-	if err := h.service.DestroyOauth(params.ID); err != nil {
-		ctx.Error(err)
+	if err := h.service.DestroyOauth(ctx.Request.Context(), params.ID); err != nil {
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
@@ -83,7 +86,7 @@ func (h *Handlers) DestroyOauth(ctx *gin.Context) {
 // @Produce json
 // @Param id path string true "id"
 // @Param Oauth body types.UpdateOauthRequest true "Oauth"
-// @Success 200 {object} model.Oauth
+// @Success 200 {object} models.Oauth
 // @Failure 400
 // @Failure 404
 // @Failure 500
@@ -91,19 +94,19 @@ func (h *Handlers) DestroyOauth(ctx *gin.Context) {
 func (h *Handlers) UpdateOauth(ctx *gin.Context) {
 	var params types.OauthParams
 	if err := ctx.ShouldBindUri(&params); err != nil {
-		ctx.Error(err)
+		ctx.JSON(http.StatusUnprocessableEntity, gin.H{"errors": err.Error()})
 		return
 	}
 
 	var json types.UpdateOauthRequest
 	if err := ctx.ShouldBindJSON(&json); err != nil {
-		ctx.Error(err)
+		ctx.JSON(http.StatusUnprocessableEntity, gin.H{"errors": err.Error()})
 		return
 	}
 
-	oauth, err := h.service.UpdateOauth(params.ID, json)
+	oauth, err := h.service.UpdateOauth(ctx.Request.Context(), params.ID, json)
 	if err != nil {
-		ctx.Error(err)
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
@@ -116,7 +119,7 @@ func (h *Handlers) UpdateOauth(ctx *gin.Context) {
 // @Accept json
 // @Produce json
 // @Param id path string true "id"
-// @Success 200 {object} model.Oauth
+// @Success 200 {object} models.Oauth
 // @Failure 400
 // @Failure 404
 // @Failure 500
@@ -128,9 +131,9 @@ func (h *Handlers) GetOauth(ctx *gin.Context) {
 		return
 	}
 
-	oauth, err := h.service.GetOauth(params.ID)
+	oauth, err := h.service.GetOauth(ctx.Request.Context(), params.ID)
 	if err != nil {
-		ctx.Error(err)
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
@@ -144,7 +147,7 @@ func (h *Handlers) GetOauth(ctx *gin.Context) {
 // @Produce json
 // @Param page query int true "current page" default(0)
 // @Param per_page query int true "return max item count, default 10, max 50" default(10) minimum(2) maximum(50)
-// @Success 200 {object} []model.Oauth
+// @Success 200 {object} []models.Oauth
 // @Failure 400
 // @Failure 404
 // @Failure 500
@@ -157,18 +160,12 @@ func (h *Handlers) GetOauths(ctx *gin.Context) {
 	}
 
 	h.setPaginationDefault(&query.Page, &query.PerPage)
-	oauth, err := h.service.GetOauths(query)
+	oauth, count, err := h.service.GetOauths(ctx.Request.Context(), query)
 	if err != nil {
-		ctx.Error(err)
+		ctx.Error(err) // nolint: errcheck
 		return
 	}
 
-	totalCount, err := h.service.OauthTotalCount(query)
-	if err != nil {
-		ctx.Error(err)
-		return
-	}
-
-	h.setPaginationLinkHeader(ctx, query.Page, query.PerPage, int(totalCount))
+	h.setPaginationLinkHeader(ctx, query.Page, query.PerPage, int(count))
 	ctx.JSON(http.StatusOK, oauth)
 }

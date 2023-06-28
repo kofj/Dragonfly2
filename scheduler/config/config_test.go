@@ -17,172 +17,767 @@
 package config
 
 import (
-	"io/ioutil"
-	"reflect"
+	"net"
+	"os"
 	"testing"
 	"time"
 
-	dc "d7y.io/dragonfly/v2/internal/dynconfig"
-	"github.com/mitchellh/mapstructure"
 	"github.com/stretchr/testify/assert"
-	testifyassert "github.com/stretchr/testify/assert"
 	"gopkg.in/yaml.v3"
+
+	"d7y.io/dragonfly/v2/pkg/rpc"
+	"d7y.io/dragonfly/v2/pkg/types"
 )
 
-func TestSchedulerConfig_Load(t *testing.T) {
-	assert := testifyassert.New(t)
+var (
+	mockManagerConfig = ManagerConfig{
+		Addr:               "localhost",
+		SchedulerClusterID: DefaultManagerSchedulerClusterID,
+		KeepAlive: KeepAliveConfig{
+			Interval: DefaultManagerKeepAliveInterval,
+		},
+	}
 
+	mockJobConfig = JobConfig{
+		Enable:             true,
+		GlobalWorkerNum:    DefaultJobGlobalWorkerNum,
+		SchedulerWorkerNum: DefaultJobSchedulerWorkerNum,
+		LocalWorkerNum:     DefaultJobLocalWorkerNum,
+	}
+
+	mockMetricsConfig = MetricsConfig{
+		Enable: true,
+		Addr:   DefaultMetricsAddr,
+	}
+
+	mockSecurityConfig = SecurityConfig{
+		AutoIssueCert: true,
+		CACert:        types.PEMContent("foo"),
+		TLSPolicy:     rpc.PreferTLSPolicy,
+		CertSpec: CertSpec{
+			DNSNames:       DefaultCertDNSNames,
+			IPAddresses:    DefaultCertIPAddresses,
+			ValidityPeriod: DefaultCertValidityPeriod,
+		},
+	}
+
+	mockRedisConfig = RedisConfig{
+		Addrs:             []string{"127.0.0.0:6379"},
+		MasterName:        "master",
+		Username:          "baz",
+		Password:          "bax",
+		BrokerDB:          DefaultRedisBrokerDB,
+		BackendDB:         DefaultRedisBackendDB,
+		NetworkTopologyDB: DefaultNetworkTopologyDB,
+	}
+)
+
+func TestConfig_Load(t *testing.T) {
 	config := &Config{
-		DynConfig: &DynConfig{
-			Type:       dc.LocalSourceType,
-			ExpireTime: 1000,
-			CDNDirPath: "tmp",
+		Scheduler: SchedulerConfig{
+			Algorithm:              "default",
+			BackToSourceCount:      3,
+			RetryBackToSourceLimit: 2,
+			RetryLimit:             10,
+			RetryInterval:          10 * time.Second,
+			GC: GCConfig{
+				PieceDownloadTimeout: 5 * time.Second,
+				PeerGCInterval:       10 * time.Second,
+				PeerTTL:              1 * time.Minute,
+				TaskGCInterval:       30 * time.Second,
+				HostGCInterval:       1 * time.Minute,
+				HostTTL:              1 * time.Minute,
+			},
 		},
-		Scheduler: &SchedulerConfig{
-			ABTest:     true,
-			AEvaluator: "a-evaluator",
-			BEvaluator: "b-evaluator",
-			WorkerNum:  8,
+		Server: ServerConfig{
+			AdvertiseIP:   net.ParseIP("127.0.0.1"),
+			AdvertisePort: 8004,
+			ListenIP:      net.ParseIP("0.0.0.0"),
+			Port:          8002,
+			Host:          "foo",
+			WorkHome:      "foo",
+			CacheDir:      "foo",
+			LogDir:        "foo",
+			PluginDir:     "foo",
+			DataDir:       "foo",
 		},
-		Server: &ServerConfig{
-			IP:   "127.0.0.1",
-			Host: "foo",
-			Port: 8002,
+		Database: DatabaseConfig{
+			Redis: RedisConfig{
+				Host:              "127.0.0.1",
+				Password:          "foo",
+				Addrs:             []string{"foo", "bar"},
+				MasterName:        "baz",
+				Port:              6379,
+				BrokerDB:          DefaultRedisBrokerDB,
+				BackendDB:         DefaultRedisBackendDB,
+				NetworkTopologyDB: DefaultNetworkTopologyDB,
+			},
 		},
-		Manager: &ManagerConfig{
+		DynConfig: DynConfig{
+			RefreshInterval: 10 * time.Second,
+		},
+		Manager: ManagerConfig{
 			Addr:               "127.0.0.1:65003",
 			SchedulerClusterID: 1,
 			KeepAlive: KeepAliveConfig{
-				Interval: 1 * time.Second,
+				Interval: 5 * time.Second,
 			},
 		},
-		Host: &HostConfig{
-			IDC:      "foo",
-			Location: "bar",
+		SeedPeer: SeedPeerConfig{
+			Enable: true,
 		},
-		Job: &JobConfig{
+		Host: HostConfig{
+			IDC:      "foo",
+			Location: "baz",
+		},
+		Job: JobConfig{
+			Enable:             true,
 			GlobalWorkerNum:    1,
 			SchedulerWorkerNum: 1,
 			LocalWorkerNum:     5,
-			Redis: &RedisConfig{
-				Host:      "127.0.0.1",
-				Port:      6379,
-				Password:  "password",
-				BrokerDB:  1,
-				BackendDB: 2,
+		},
+		Storage: StorageConfig{
+			MaxSize:    1,
+			MaxBackups: 1,
+			BufferSize: 1,
+		},
+		Metrics: MetricsConfig{
+			Enable:     false,
+			Addr:       ":8000",
+			EnableHost: true,
+		},
+		Security: SecurityConfig{
+			AutoIssueCert: true,
+			CACert:        "foo",
+			TLSVerify:     true,
+			TLSPolicy:     "force",
+			CertSpec: CertSpec{
+				DNSNames:       []string{"foo"},
+				IPAddresses:    []net.IP{net.IPv4zero},
+				ValidityPeriod: 10 * time.Minute,
 			},
 		},
-		Metrics: &RestConfig{
-			Addr: ":8000",
+		Network: NetworkConfig{
+			EnableIPv6: true,
 		},
-		DisableCDN: true,
+		NetworkTopology: NetworkTopologyConfig{
+			Enable:          true,
+			CollectInterval: 60 * time.Second,
+			Probe: ProbeConfig{
+				QueueLength: 5,
+				Count:       10,
+			},
+		},
+		Trainer: TrainerConfig{
+			Enable:        false,
+			Addr:          "127.0.0.1:9000",
+			Interval:      10 * time.Minute,
+			UploadTimeout: 2 * time.Hour,
+		},
 	}
 
 	schedulerConfigYAML := &Config{}
-	contentYAML, _ := ioutil.ReadFile("./testdata/scheduler.yaml")
-	var dataYAML map[string]interface{}
-	yaml.Unmarshal(contentYAML, &dataYAML)
-	mapstructure.Decode(dataYAML, &schedulerConfigYAML)
-	assert.True(reflect.DeepEqual(config, schedulerConfigYAML))
+	contentYAML, _ := os.ReadFile("./testdata/scheduler.yaml")
+	if err := yaml.Unmarshal(contentYAML, &schedulerConfigYAML); err != nil {
+		t.Fatal(err)
+	}
+
+	assert := assert.New(t)
+	assert.EqualValues(schedulerConfigYAML, config)
 }
 
-func TestConvert(t *testing.T) {
+func TestConfig_Validate(t *testing.T) {
 	tests := []struct {
 		name   string
-		value  *Config
-		expect func(t *testing.T, cfg *Config, err error)
+		config *Config
+		mock   func(cfg *Config)
+		expect func(t *testing.T, err error)
 	}{
 		{
-			name: "convert common config",
-			value: &Config{
-				Manager: &ManagerConfig{
-					Addr: "127.0.0.1:65003",
-				},
-				Job: &JobConfig{
-					Redis: &RedisConfig{
-						Host: "",
-					},
-				},
+			name:   "valid config",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
 			},
-			expect: func(t *testing.T, cfg *Config, err error) {
+			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.Equal("127.0.0.1", cfg.Job.Redis.Host)
+				assert.NoError(err)
 			},
 		},
 		{
-			name: "convert config when host not empty",
-			value: &Config{
-				Manager: &ManagerConfig{
-					Addr: "127.0.0.1:65003",
-				},
-				Job: &JobConfig{
-					Redis: &RedisConfig{
-						Host: "111.111.11.1",
-					},
-				},
+			name:   "server requires parameter advertiseIP",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Job = mockJobConfig
+				cfg.Server.AdvertiseIP = nil
 			},
-			expect: func(t *testing.T, cfg *Config, err error) {
+			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.Equal("111.111.11.1", cfg.Job.Redis.Host)
+				assert.EqualError(err, "server requires parameter advertiseIP")
 			},
 		},
 		{
-			name: "convert config when manager addr is empty",
-			value: &Config{
-				Manager: &ManagerConfig{
-					Addr: "",
-				},
-				Job: &JobConfig{
-					Redis: &RedisConfig{
-						Host: "111.111.11.1",
-					},
-				},
+			name:   "server requires parameter listenIP",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Job = mockJobConfig
+				cfg.Server.ListenIP = nil
 			},
-			expect: func(t *testing.T, cfg *Config, err error) {
+			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.Equal("111.111.11.1", cfg.Job.Redis.Host)
+				assert.EqualError(err, "server requires parameter listenIP")
 			},
 		},
 		{
-			name: "convert config when manager host is empty",
-			value: &Config{
-				Manager: &ManagerConfig{
-					Addr: ":65003",
-				},
-				Job: &JobConfig{
-					Redis: &RedisConfig{
-						Host: "",
-					},
-				},
+			name:   "server requires parameter port",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Job = mockJobConfig
+				cfg.Server.Port = 0
 			},
-			expect: func(t *testing.T, cfg *Config, err error) {
+			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.Equal("", cfg.Job.Redis.Host)
+				assert.EqualError(err, "server requires parameter port")
 			},
 		},
 		{
-			name: "convert config when manager host is localhost",
-			value: &Config{
-				Manager: &ManagerConfig{
-					Addr: "localhost:65003",
-				},
-				Job: &JobConfig{
-					Redis: &RedisConfig{
-						Host: "",
-					},
-				},
+			name:   "server requires parameter host",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Job = mockJobConfig
+				cfg.Server.Host = ""
 			},
-			expect: func(t *testing.T, cfg *Config, err error) {
+			expect: func(t *testing.T, err error) {
 				assert := assert.New(t)
-				assert.Equal("localhost", cfg.Job.Redis.Host)
+				assert.EqualError(err, "server requires parameter host")
+			},
+		},
+		{
+			name:   "redis requires parameter brokerDB",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Database.Redis.BrokerDB = -1
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "redis requires parameter brokerDB")
+			},
+		},
+		{
+			name:   "redis requires parameter backendDB",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Database.Redis.BackendDB = -1
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "redis requires parameter backendDB")
+			},
+		},
+		{
+			name:   "redis requires parameter networkTopologyDB",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Database.Redis.NetworkTopologyDB = -1
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "redis requires parameter networkTopologyDB")
+			},
+		},
+		{
+			name:   "scheduler requires parameter algorithm",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Scheduler.Algorithm = ""
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "scheduler requires parameter algorithm")
+			},
+		},
+		{
+			name:   "scheduler requires parameter backToSourceCount",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Scheduler.BackToSourceCount = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "scheduler requires parameter backToSourceCount")
+			},
+		},
+		{
+			name:   "scheduler requires parameter retryBackToSourceLimit",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Scheduler.RetryBackToSourceLimit = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "scheduler requires parameter retryBackToSourceLimit")
+			},
+		},
+		{
+			name:   "scheduler requires parameter retryLimit",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Scheduler.RetryLimit = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "scheduler requires parameter retryLimit")
+			},
+		},
+		{
+			name:   "scheduler requires parameter retryInterval",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Scheduler.RetryInterval = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "scheduler requires parameter retryInterval")
+			},
+		},
+		{
+			name:   "scheduler requires parameter pieceDownloadTimeout",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Scheduler.GC.PieceDownloadTimeout = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "scheduler requires parameter pieceDownloadTimeout")
+			},
+		},
+		{
+			name:   "scheduler requires parameter peerTTL",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Scheduler.GC.PeerTTL = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "scheduler requires parameter peerTTL")
+			},
+		},
+		{
+			name:   "scheduler requires parameter peerGCInterval",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Scheduler.GC.PeerGCInterval = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "scheduler requires parameter peerGCInterval")
+			},
+		},
+		{
+			name:   "scheduler requires parameter taskGCInterval",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Scheduler.GC.TaskGCInterval = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "scheduler requires parameter taskGCInterval")
+			},
+		},
+		{
+			name:   "scheduler requires parameter hostGCInterval",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Scheduler.GC.HostGCInterval = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "scheduler requires parameter hostGCInterval")
+			},
+		},
+		{
+			name:   "scheduler requires parameter hostTTL",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Scheduler.GC.HostTTL = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "scheduler requires parameter hostTTL")
+			},
+		},
+		{
+			name:   "dynconfig requires parameter refreshInterval",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.DynConfig.RefreshInterval = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "dynconfig requires parameter refreshInterval")
+			},
+		},
+		{
+			name:   "manager requires parameter addr",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Manager.Addr = ""
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "manager requires parameter addr")
+			},
+		},
+		{
+			name:   "manager requires parameter schedulerClusterID",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Manager.SchedulerClusterID = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "manager requires parameter schedulerClusterID")
+			},
+		},
+		{
+			name:   "manager requires parameter keepAlive interval",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Manager.KeepAlive.Interval = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "manager requires parameter keepAlive interval")
+			},
+		},
+		{
+			name:   "job requires parameter globalWorkerNum",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Job.GlobalWorkerNum = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "job requires parameter globalWorkerNum")
+			},
+		},
+		{
+			name:   "job requires parameter schedulerWorkerNum",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Job.SchedulerWorkerNum = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "job requires parameter schedulerWorkerNum")
+			},
+		},
+		{
+			name:   "job requires parameter localWorkerNum",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Job.LocalWorkerNum = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "job requires parameter localWorkerNum")
+			},
+		},
+		{
+			name:   "storage requires parameter maxSize",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Storage.MaxSize = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "storage requires parameter maxSize")
+			},
+		},
+		{
+			name:   "storage requires parameter maxBackups",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Storage.MaxBackups = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "storage requires parameter maxBackups")
+			},
+		},
+		{
+			name:   "storage requires parameter bufferSize",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Storage.BufferSize = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "storage requires parameter bufferSize")
+			},
+		},
+		{
+			name:   "metrics requires parameter addr",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Metrics = mockMetricsConfig
+				cfg.Metrics.Addr = ""
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "metrics requires parameter addr")
+			},
+		},
+		{
+			name:   "security requires parameter caCert",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Security = mockSecurityConfig
+				cfg.Security.CACert = ""
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "security requires parameter caCert")
+			},
+		},
+		{
+			name:   "security requires parameter tlsPolicy",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Security = mockSecurityConfig
+				cfg.Security.TLSPolicy = ""
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "security requires parameter tlsPolicy")
+			},
+		},
+		{
+			name:   "certSpec requires parameter ipAddresses",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Security = mockSecurityConfig
+				cfg.Security.CertSpec.IPAddresses = []net.IP{}
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "certSpec requires parameter ipAddresses")
+			},
+		},
+		{
+			name:   "certSpec requires parameter dnsNames",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Security = mockSecurityConfig
+				cfg.Security.CertSpec.DNSNames = []string{}
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "certSpec requires parameter dnsNames")
+			},
+		},
+		{
+			name:   "certSpec requires parameter validityPeriod",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Security = mockSecurityConfig
+				cfg.Security.CertSpec.ValidityPeriod = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "certSpec requires parameter validityPeriod")
+			},
+		},
+		{
+			name:   "networkTopology requires parameter collectInterval",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.NetworkTopology.CollectInterval = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "networkTopology requires parameter collectInterval")
+			},
+		},
+		{
+			name:   "probe requires parameter queueLength",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.NetworkTopology.Probe.QueueLength = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "probe requires parameter queueLength")
+			},
+		},
+		{
+			name:   "probe requires parameter count",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.NetworkTopology.Probe.Count = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "probe requires parameter count")
+			},
+		},
+		{
+			name:   "trainer requires parameter addr",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Trainer.Enable = true
+				cfg.Trainer.Addr = ""
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "trainer requires parameter addr")
+			},
+		},
+		{
+			name:   "trainer requires parameter interval",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Trainer.Enable = true
+				cfg.Trainer.Interval = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "trainer requires parameter interval")
+			},
+		},
+		{
+			name:   "trainer requires parameter interval",
+			config: New(),
+			mock: func(cfg *Config) {
+				cfg.Manager = mockManagerConfig
+				cfg.Database.Redis = mockRedisConfig
+				cfg.Job = mockJobConfig
+				cfg.Trainer.Enable = true
+				cfg.Trainer.UploadTimeout = 0
+			},
+			expect: func(t *testing.T, err error) {
+				assert := assert.New(t)
+				assert.EqualError(err, "trainer requires parameter uploadTimeout")
 			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := tc.value.Convert()
-			tc.expect(t, tc.value, err)
+			if err := tc.config.Convert(); err != nil {
+				t.Fatal(err)
+			}
+
+			tc.mock(tc.config)
+			tc.expect(t, tc.config.Validate())
 		})
 	}
 }

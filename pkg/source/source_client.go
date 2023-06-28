@@ -13,133 +13,169 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-//go:generate mockgen -destination ./mock/mock_source_client.go -package mock d7y.io/dragonfly/v2/pkg/source ResourceClient
+
+//go:generate mockgen -destination mocks/mock_source_client.go -source source_client.go -package mocks
 
 package source
 
 import (
 	"context"
-	"io"
+	"errors"
+	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/go-http-utils/headers"
-	"github.com/pkg/errors"
-
 	logger "d7y.io/dragonfly/v2/internal/dflog"
-	rangers "d7y.io/dragonfly/v2/pkg/util/rangeutils"
 )
 
-var _ ResourceClient = (*clientManager)(nil)
-var _ ClientManager = (*clientManager)(nil)
+var (
+	// client back-to-source timeout for metadata
+	contextTimeout = 1 * time.Minute
+)
 
-// ResourceClient supply apis that interact with the source.
+var (
+	// ErrResourceNotReachable represents the url resource is a not reachable.
+	ErrResourceNotReachable = errors.New("resource is not reachable")
+
+	// ErrNoClientFound represents no source client to resolve url
+	ErrNoClientFound = errors.New("no source client found")
+
+	// ErrClientNotSupportList represents the source client not support list action
+	ErrClientNotSupportList = errors.New("source client not support list")
+
+	// ErrClientNotSupportContentLength represents the source client not support get content length action
+	ErrClientNotSupportContentLength = errors.New("source client not support get content length")
+
+	// ErrClientNotSupportGetMetadata represents the source client not support get metadata
+	ErrClientNotSupportGetMetadata = errors.New("source client not support get metadata")
+)
+
+// UnexpectedStatusCodeError is returned when a source responds with neither an error
+// nor with a status code indicating success.
+type UnexpectedStatusCodeError struct {
+	allowed []int // The expected stats code returned from source
+	got     int   // The actual status code from source
+}
+
+// Error implements interface error
+func (e UnexpectedStatusCodeError) Error() string {
+	var expected []string
+	for _, v := range e.allowed {
+		expected = append(expected, strconv.Itoa(v))
+	}
+	return fmt.Sprintf("status code from source is %s; was expecting %s",
+		strconv.Itoa(e.got), strings.Join(expected, " or "))
+}
+
+// Got is the actual status code returned by source.
+func (e UnexpectedStatusCodeError) Got() int {
+	return e.got
+}
+
+// CheckResponseCode returns UnexpectedStatusError if the given response code is not
+// one of the allowed status codes; otherwise nil.
+func CheckResponseCode(respCode int, allowed []int) error {
+	for _, v := range allowed {
+		if respCode == v {
+			return nil
+		}
+	}
+	return UnexpectedStatusCodeError{allowed, respCode}
+}
+
+func IsResourceNotReachableError(err error) bool {
+	return errors.Is(err, ErrResourceNotReachable)
+}
+
+func IsNoClientFoundError(err error) bool {
+	return errors.Is(err, ErrNoClientFound)
+}
+
+const (
+	UnknownSourceFileLen = -2
+)
+
+// ResourceClient defines the API interface to interact with source.
 type ResourceClient interface {
-
 	// GetContentLength get length of resource content
-	// return -l if request fail
-	// return task.IllegalSourceFileLen if response status is not StatusOK and StatusPartialContent
-	GetContentLength(ctx context.Context, url string, header RequestHeader, rang *rangers.Range) (int64, error)
+	// return source.UnknownSourceFileLen if response status is not StatusOK and StatusPartialContent
+	GetContentLength(request *Request) (int64, error)
 
 	// IsSupportRange checks if resource supports breakpoint continuation
-	IsSupportRange(ctx context.Context, url string, header RequestHeader) (bool, error)
+	// return false if response status is not StatusPartialContent
+	IsSupportRange(request *Request) (bool, error)
 
 	// IsExpired checks if a resource received or stored is the same.
-	IsExpired(ctx context.Context, url string, header RequestHeader, expireInfo map[string]string) (bool, error)
+	// return false and non-nil err to prevent the source from exploding if
+	// fails to get the result, it is considered that the source has not expired
+	IsExpired(request *Request, info *ExpireInfo) (bool, error)
 
 	// Download downloads from source
-	Download(ctx context.Context, url string, header RequestHeader, rang *rangers.Range) (io.ReadCloser, error)
+	Download(request *Request) (*Response, error)
 
-	// DownloadWithResponseHeader download from source with responseHeader
-	DownloadWithResponseHeader(ctx context.Context, url string, header RequestHeader, rang *rangers.Range) (io.ReadCloser, ResponseHeader, error)
+	// GetLastModified gets last modified timestamp milliseconds of resource
+	GetLastModified(request *Request) (int64, error)
+}
 
-	// GetLastModifiedMillis gets last modified timestamp milliseconds of resource
-	GetLastModifiedMillis(ctx context.Context, url string, header RequestHeader) (int64, error)
+// ResourceMetadataGetter defines the API interface to get metadata for special resource
+// The metadata will be used for concurrent multiple pieces downloading
+type ResourceMetadataGetter interface {
+	GetMetadata(request *Request) (*Metadata, error)
+}
+
+// URLEntry is an entry which read from url with specific protocol
+// It is used in recursive downloading
+type URLEntry struct {
+	//URL download url
+	URL *url.URL
+
+	// Name returns the name of the file (or subdirectory) described by the entry.
+	// Name will be used in recursive downloading as file name or subdirectory name
+	// This name is only the final element of the path (the commonv1 name), not the entire path.
+	// For example, Name would return "hello.go" not "home/gopher/hello.go".
+	Name string
+	// IsDir reports whether the entry describes a directory.
+	IsDir bool
+	// Entry attribute, like oss md5 and expire time
+	Attribute map[string]string
+}
+
+// ResourceLister defines the interface to list all downloadable resources in request url
+type ResourceLister interface {
+	// List only list current level resources in request url
+	// the request may represent a single file or a directory
+	// if the request represent a directory, the result should return all file entries and subdirectory entries below the request directory
+	// if the request represent a single file, the result should return a single file entry or empty slice
+	List(request *Request) (urls []URLEntry, err error)
 }
 
 type ClientManager interface {
-	ResourceClient
-	Register(schema string, resourceClient ResourceClient)
-	UnRegister(schema string)
+	// Register registers a source client with scheme
+	Register(scheme string, resourceClient ResourceClient, adapter RequestAdapter, hook ...Hook) error
+
+	// UnRegister revoke a source client from manager
+	UnRegister(scheme string)
+
+	// GetClient gets a source client by scheme
+	GetClient(scheme string, options ...Option) (ResourceClient, bool)
+
+	// ListClients lists all supported client scheme
+	ListClients() []string
 }
 
+// clientManager implements the interface ClientManager
 type clientManager struct {
-	sync.RWMutex
-	clients map[string]ResourceClient
+	mu        sync.RWMutex
+	clients   map[string]ResourceClient
+	pluginDir string
 }
+
+var _ ClientManager = (*clientManager)(nil)
 
 var _defaultManager = NewManager()
-
-func (m *clientManager) GetContentLength(ctx context.Context, url string, header RequestHeader, rang *rangers.Range) (int64, error) {
-	sourceClient, err := m.getSourceClient(url)
-	if err != nil {
-		return -1, err
-	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-	}
-	return sourceClient.GetContentLength(ctx, url, header, rang)
-}
-
-func (m *clientManager) IsSupportRange(ctx context.Context, url string, header RequestHeader) (bool, error) {
-	sourceClient, err := m.getSourceClient(url)
-	if err != nil {
-		return false, err
-	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-	}
-	return sourceClient.IsSupportRange(ctx, url, header)
-}
-
-func (m *clientManager) IsExpired(ctx context.Context, url string, header RequestHeader, expireInfo map[string]string) (bool, error) {
-	sourceClient, err := m.getSourceClient(url)
-	if err != nil {
-		return false, err
-	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-	}
-	return sourceClient.IsExpired(ctx, url, header, expireInfo)
-}
-
-func (m *clientManager) Download(ctx context.Context, url string, header RequestHeader, rang *rangers.Range) (io.ReadCloser, error) {
-	sourceClient, err := m.getSourceClient(url)
-	if err != nil {
-		return nil, err
-	}
-	return sourceClient.Download(ctx, url, header, rang)
-}
-
-func (m *clientManager) DownloadWithResponseHeader(ctx context.Context, url string, header RequestHeader, rang *rangers.Range) (io.ReadCloser, ResponseHeader,
-	error) {
-	sourceClient, err := m.getSourceClient(url)
-	if err != nil {
-		return nil, nil, err
-	}
-	return sourceClient.DownloadWithResponseHeader(ctx, url, header, rang)
-}
-
-func (m *clientManager) GetLastModifiedMillis(ctx context.Context, url string, header RequestHeader) (int64, error) {
-	sourceClient, err := m.getSourceClient(url)
-	if err != nil {
-		return -1, err
-	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-	}
-	return sourceClient.GetLastModifiedMillis(ctx, url, header)
-}
 
 func NewManager() ClientManager {
 	return &clientManager{
@@ -147,106 +183,228 @@ func NewManager() ClientManager {
 	}
 }
 
-func (m *clientManager) Register(schema string, resourceClient ResourceClient) {
-	if client, ok := m.clients[strings.ToLower(schema)]; ok {
-		logger.Infof("replace client %#v with %#v for schema %s", client, resourceClient, schema)
-	}
-	m.clients[strings.ToLower(schema)] = resourceClient
+type Option func(c *clientManager)
+
+func UpdatePluginDir(pluginDir string) {
+	_defaultManager.(*clientManager).pluginDir = pluginDir
 }
 
-func Register(schema string, resourceClient ResourceClient) {
-	_defaultManager.Register(schema, resourceClient)
-}
-
-func (m *clientManager) UnRegister(schema string) {
-	if client, ok := m.clients[strings.ToLower(schema)]; ok {
-		logger.Infof("remove client %#v for schema %s", client, schema)
-	}
-	delete(m.clients, strings.ToLower(schema))
-}
-
-func UnRegister(schema string) {
-	_defaultManager.UnRegister(schema)
-}
-
-func GetContentLength(ctx context.Context, url string, header RequestHeader) (int64, error) {
-	var httpRange *rangers.Range
-	if header.Get(headers.Range) != "" {
-		var err error
-		httpRange, err = rangers.ParseHTTPRange(header.Get(headers.Range))
-		if err != nil {
-			return -1, err
+func (m *clientManager) Register(scheme string, resourceClient ResourceClient, adaptor RequestAdapter, hooks ...Hook) error {
+	scheme = strings.ToLower(scheme)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if client, ok := m.clients[scheme]; ok {
+		if client.(*clientWrapper).rc != resourceClient {
+			return fmt.Errorf("client with scheme %s already exist, current client: %#v", scheme, client)
 		}
+		logger.Warnf("client with scheme %s already exist, no need register again", scheme)
+		return nil
 	}
-	return _defaultManager.GetContentLength(ctx, url, header, httpRange)
+	m.doRegister(scheme, &clientWrapper{
+		adapter: adaptor,
+		hooks:   hooks,
+		rc:      resourceClient,
+	})
+	return nil
 }
 
-func IsSupportRange(ctx context.Context, url string, header RequestHeader) (bool, error) {
-	return _defaultManager.IsSupportRange(ctx, url, header)
+func (m *clientManager) doRegister(scheme string, resourceClient ResourceClient) {
+	m.clients[strings.ToLower(scheme)] = resourceClient
 }
 
-func IsExpired(ctx context.Context, url string, header RequestHeader, expireInfo map[string]string) (bool, error) {
-	return _defaultManager.IsExpired(ctx, url, header, expireInfo)
-}
-
-func Download(ctx context.Context, url string, header RequestHeader) (io.ReadCloser, error) {
-	var httpRange *rangers.Range
-	if header.Get(headers.Range) != "" {
-		var err error
-		httpRange, err = rangers.ParseHTTPRange(header.Get(headers.Range))
-		if err != nil {
-			return nil, err
-		}
+func (m *clientManager) UnRegister(scheme string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	scheme = strings.ToLower(scheme)
+	if client, ok := m.clients[scheme]; ok {
+		logger.Infof("remove client %#v for scheme %s", client, scheme)
 	}
-	return _defaultManager.Download(ctx, url, header, httpRange)
+	delete(m.clients, scheme)
 }
 
-func DownloadWithResponseHeader(ctx context.Context, url string, header RequestHeader) (io.ReadCloser, ResponseHeader, error) {
-
-	var httpRange *rangers.Range
-	if header.Get(headers.Range) != "" {
-		var err error
-		httpRange, err = rangers.ParseHTTPRange(header.Get(headers.Range))
-		if err != nil {
-			return nil, nil, err
-		}
+func (m *clientManager) ListClients() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var clients []string
+	for c := range m.clients {
+		clients = append(clients, c)
 	}
-	return _defaultManager.DownloadWithResponseHeader(ctx, url, header, httpRange)
+	return clients
 }
 
-func GetLastModifiedMillis(ctx context.Context, url string, header RequestHeader) (int64, error) {
-	return _defaultManager.GetLastModifiedMillis(ctx, url, header)
-}
-
-// getSourceClient get a source client from source manager with specified schema.
-func (m *clientManager) getSourceClient(rawURL string) (ResourceClient, error) {
+func (m *clientManager) GetClient(scheme string, options ...Option) (ResourceClient, bool) {
 	logger.Debugf("current clients: %#v", m.clients)
-	parsedURL, err := url.Parse(rawURL)
+	m.mu.RLock()
+	scheme = strings.ToLower(scheme)
+	client, ok := m.clients[scheme]
+	if ok {
+		m.mu.RUnlock()
+		return client, true
+	}
+	m.mu.RUnlock()
+	m.mu.Lock()
+	client, ok = m.clients[scheme]
+	if ok {
+		m.mu.Unlock()
+		return client, true
+	}
+
+	for _, opt := range options {
+		opt(m)
+	}
+
+	client, err := LoadPlugin(m.pluginDir, scheme)
 	if err != nil {
-		return nil, err
+		logger.Errorf("failed to load source plugin for scheme %s: %v", scheme, err)
+		m.mu.Unlock()
+		return nil, false
 	}
-	m.RLock()
-	client, ok := m.clients[strings.ToLower(parsedURL.Scheme)]
-	m.RUnlock()
-	if !ok || client == nil {
-		return nil, errors.Errorf("can not find client for supporting url %s, clients:%v", rawURL, m.clients)
-	}
-	return client, nil
+	m.doRegister(scheme, client)
+	m.mu.Unlock()
+	return client, true
 }
 
-func (m *clientManager) loadSourcePlugin(schema string) (ResourceClient, error) {
-	m.Lock()
-	defer m.Unlock()
-	// double check
-	client, ok := m.clients[schema]
-	if ok {
-		return client, nil
-	}
+func Register(scheme string, resourceClient ResourceClient, adaptor RequestAdapter, hooks ...Hook) error {
+	return _defaultManager.Register(scheme, resourceClient, adaptor, hooks...)
+}
 
-	client, err := LoadPlugin(schema)
-	if err != nil {
-		return nil, err
+func UnRegister(scheme string) {
+	_defaultManager.UnRegister(scheme)
+}
+
+func ListClients() []string {
+	return _defaultManager.ListClients()
+}
+
+type RequestAdapter func(request *Request) *Request
+
+// Hook TODO hook
+type Hook interface {
+	BeforeRequest(request *Request) error
+	AfterResponse(response *Response) error
+}
+
+type clientWrapper struct {
+	adapter RequestAdapter
+	hooks   []Hook
+	rc      ResourceClient
+}
+
+func (c *clientWrapper) GetContentLength(request *Request) (int64, error) {
+	return c.rc.GetContentLength(c.adapter(request))
+}
+
+func (c *clientWrapper) IsSupportRange(request *Request) (bool, error) {
+	return c.rc.IsSupportRange(c.adapter(request))
+}
+
+func (c *clientWrapper) IsExpired(request *Request, info *ExpireInfo) (bool, error) {
+	return c.rc.IsExpired(c.adapter(request), info)
+}
+
+func (c *clientWrapper) Download(request *Request) (*Response, error) {
+	return c.rc.Download(c.adapter(request))
+}
+
+func (c *clientWrapper) GetLastModified(request *Request) (int64, error) {
+	return c.rc.GetLastModified(c.adapter(request))
+}
+
+func GetContentLength(request *Request) (int64, error) {
+	client, ok := _defaultManager.GetClient(request.URL.Scheme)
+	if !ok {
+		return UnknownSourceFileLen, fmt.Errorf("scheme %s: %w", request.URL.Scheme, ErrNoClientFound)
 	}
-	m.clients[schema] = client
-	return client, nil
+	if _, ok := request.Context().Deadline(); !ok {
+		ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
+		request = request.WithContext(ctx)
+		defer cancel()
+	}
+	return client.GetContentLength(request)
+}
+
+func IsSupportRange(request *Request) (bool, error) {
+	client, ok := _defaultManager.GetClient(request.URL.Scheme)
+	if !ok {
+		return false, fmt.Errorf("scheme %s: %w", request.URL.Scheme, ErrNoClientFound)
+	}
+	if _, ok := request.Context().Deadline(); !ok {
+		ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
+		request = request.WithContext(ctx)
+		defer cancel()
+	}
+	if request.Header.get(Range) == "" {
+		request.Header.Add(Range, "0-0")
+	}
+	return client.IsSupportRange(request)
+}
+
+func IsExpired(request *Request, info *ExpireInfo) (bool, error) {
+	client, ok := _defaultManager.GetClient(request.URL.Scheme)
+	if !ok {
+		return false, fmt.Errorf("scheme %s: %w", request.URL.Scheme, ErrNoClientFound)
+	}
+	if _, ok := request.Context().Deadline(); !ok {
+		ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
+		request = request.WithContext(ctx)
+		defer cancel()
+	}
+	return client.IsExpired(request, info)
+}
+
+func GetLastModified(request *Request) (int64, error) {
+	client, ok := _defaultManager.GetClient(request.URL.Scheme)
+	if !ok {
+		return -1, fmt.Errorf("scheme %s: %w", request.URL.Scheme, ErrNoClientFound)
+	}
+	if _, ok := request.Context().Deadline(); !ok {
+		ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
+		request = request.WithContext(ctx)
+		defer cancel()
+	}
+	return client.GetLastModified(request)
+}
+
+func Download(request *Request) (*Response, error) {
+	client, ok := _defaultManager.GetClient(request.URL.Scheme)
+	if !ok {
+		return nil, fmt.Errorf("scheme %s: %w", request.URL.Scheme, ErrNoClientFound)
+	}
+	return client.Download(request)
+}
+
+func List(request *Request) ([]URLEntry, error) {
+	client, ok := _defaultManager.GetClient(request.URL.Scheme)
+	if !ok {
+		return nil, fmt.Errorf("scheme %s: %w", request.URL.Scheme, ErrNoClientFound)
+	}
+	// invoke in-tree plugin adapter
+	if wrap, ok := client.(*clientWrapper); ok {
+		if rc, ok := wrap.rc.(ResourceLister); ok {
+			return rc.List(wrap.adapter(request))
+		}
+	}
+	lister, ok := client.(ResourceLister)
+	if !ok {
+		return nil, fmt.Errorf("scheme %s: %w", request.URL.Scheme, ErrClientNotSupportList)
+	}
+	return lister.List(request)
+}
+
+func GetMetadata(request *Request) (*Metadata, error) {
+	client, ok := _defaultManager.GetClient(request.URL.Scheme)
+	if !ok {
+		return nil, fmt.Errorf("scheme %s: %w", request.URL.Scheme, ErrNoClientFound)
+	}
+	// invoke in-tree plugin adapter
+	if wrap, ok := client.(*clientWrapper); ok {
+		if rc, ok := wrap.rc.(ResourceMetadataGetter); ok {
+			return rc.GetMetadata(wrap.adapter(request))
+		}
+	}
+	getter, ok := client.(ResourceMetadataGetter)
+	if !ok {
+		return nil, fmt.Errorf("scheme %s: %w", request.URL.Scheme, ErrClientNotSupportGetMetadata)
+	}
+	return getter.GetMetadata(request)
 }

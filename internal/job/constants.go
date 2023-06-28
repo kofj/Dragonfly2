@@ -16,14 +16,23 @@
 
 package job
 
-// Queue Name
+// Queue Name.
 const (
 	GlobalQueue     = Queue("global")
 	SchedulersQueue = Queue("schedulers")
-	CDNsQueue       = Queue("cdns")
 )
 
-// Job Name
+// Job Name.
 const (
 	PreheatJob = "preheat"
+)
+
+// Machinery server configuration.
+const (
+	DefaultResultsExpireIn     = 86400
+	DefaultRedisMaxIdle        = 10
+	DefaultRedisIdleTimeout    = 300
+	DefaultRedisReadTimeout    = 60
+	DefaultRedisWriteTimeout   = 60
+	DefaultRedisConnectTimeout = 60
 )

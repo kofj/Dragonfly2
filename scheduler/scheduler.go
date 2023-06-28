@@ -18,167 +18,302 @@ package scheduler
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"path/filepath"
 	"time"
 
-	"d7y.io/dragonfly/v2/cmd/dependency"
+	"github.com/go-redis/redis/v8"
+	"github.com/johanbrandhorst/certify"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	zapadapter "logur.dev/adapter/zap"
+
 	logger "d7y.io/dragonfly/v2/internal/dflog"
 	"d7y.io/dragonfly/v2/internal/dynconfig"
+	"d7y.io/dragonfly/v2/pkg/cache"
+	"d7y.io/dragonfly/v2/pkg/dfpath"
 	"d7y.io/dragonfly/v2/pkg/gc"
+	"d7y.io/dragonfly/v2/pkg/issuer"
+	"d7y.io/dragonfly/v2/pkg/net/ip"
+	pkgredis "d7y.io/dragonfly/v2/pkg/redis"
 	"d7y.io/dragonfly/v2/pkg/rpc"
-	"d7y.io/dragonfly/v2/pkg/rpc/manager"
 	managerclient "d7y.io/dragonfly/v2/pkg/rpc/manager/client"
-	"d7y.io/dragonfly/v2/pkg/util/net/iputils"
+	securityclient "d7y.io/dragonfly/v2/pkg/rpc/security/client"
+	trainerclient "d7y.io/dragonfly/v2/pkg/rpc/trainer/client"
+	"d7y.io/dragonfly/v2/pkg/types"
+	"d7y.io/dragonfly/v2/scheduler/announcer"
 	"d7y.io/dragonfly/v2/scheduler/config"
-	"d7y.io/dragonfly/v2/scheduler/core"
 	"d7y.io/dragonfly/v2/scheduler/job"
 	"d7y.io/dragonfly/v2/scheduler/metrics"
+	"d7y.io/dragonfly/v2/scheduler/networktopology"
+	"d7y.io/dragonfly/v2/scheduler/resource"
 	"d7y.io/dragonfly/v2/scheduler/rpcserver"
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"google.golang.org/grpc"
+	"d7y.io/dragonfly/v2/scheduler/scheduling"
+	"d7y.io/dragonfly/v2/scheduler/storage"
 )
 
 const (
-	gracefulStopTimeout = 10 * time.Second
+	// gracefulStopTimeout specifies a time limit for
+	// grpc server to complete a graceful shutdown.
+	gracefulStopTimeout = 10 * time.Minute
 )
 
+// Server is the scheduler server.
 type Server struct {
-	// Server configuration
+	// Server configuration.
 	config *config.Config
 
-	// GRPC server
+	// GRPC server.
 	grpcServer *grpc.Server
 
-	// Metrics server
+	// Metrics server.
 	metricsServer *http.Server
 
-	// Scheduler service
-	service *core.SchedulerService
+	// Manager client.
+	managerClient managerclient.V2
 
-	// Manager client
-	managerClient managerclient.Client
+	// Security client.
+	securityClient securityclient.V1
 
-	// Dynamic config
-	dynConfig config.DynconfigInterface
+	// Trainer client.
+	trainerClient trainerclient.V1
 
-	// Async job
+	// Resource interface.
+	resource resource.Resource
+
+	// Dynamic config.
+	dynconfig config.DynconfigInterface
+
+	// Async job.
 	job job.Job
 
-	// GC server
+	// Storage interface.
+	storage storage.Storage
+
+	// Announcer interface.
+	announcer announcer.Announcer
+
+	// Network topology interface.
+	networkTopology networktopology.NetworkTopology
+
+	// GC service.
 	gc gc.GC
 }
 
-func New(cfg *config.Config) (*Server, error) {
+// New creates a new scheduler server.
+func New(ctx context.Context, cfg *config.Config, d dfpath.Dfpath) (*Server, error) {
 	s := &Server{config: cfg}
 
-	// Initialize manager client
-	if cfg.Manager.Addr != "" {
-		managerClient, err := managerclient.New(cfg.Manager.Addr)
+	// Initialize Storage.
+	storage, err := storage.New(
+		d.DataDir(),
+		cfg.Storage.MaxSize,
+		cfg.Storage.MaxBackups,
+		cfg.Storage.BufferSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	s.storage = storage
+
+	// Initialize dial options of manager grpc client.
+	managerDialOptions := []grpc.DialOption{}
+	if cfg.Security.AutoIssueCert {
+		clientTransportCredentials, err := rpc.NewClientCredentials(cfg.Security.TLSPolicy, nil, []byte(cfg.Security.CACert))
 		if err != nil {
 			return nil, err
 		}
-		s.managerClient = managerClient
 
-		// Register to manager
-		if _, err := s.managerClient.UpdateScheduler(&manager.UpdateSchedulerRequest{
-			SourceType:         manager.SourceType_SCHEDULER_SOURCE,
-			HostName:           s.config.Server.Host,
-			Ip:                 s.config.Server.IP,
-			Port:               int32(s.config.Server.Port),
-			Idc:                s.config.Host.IDC,
-			Location:           s.config.Host.Location,
-			SchedulerClusterId: uint64(s.config.Manager.SchedulerClusterID),
+		managerDialOptions = append(managerDialOptions, grpc.WithTransportCredentials(clientTransportCredentials))
+	} else {
+		managerDialOptions = append(managerDialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+
+	// Initialize manager client.
+	managerClient, err := managerclient.GetV2ByAddr(ctx, cfg.Manager.Addr, managerDialOptions...)
+	if err != nil {
+		return nil, err
+	}
+	s.managerClient = managerClient
+
+	// Initialize dial options of trainer grpc client.
+	if cfg.Trainer.Enable {
+		trainerDialOptions := []grpc.DialOption{}
+		if cfg.Security.AutoIssueCert {
+			clientTransportCredentials, err := rpc.NewClientCredentials(cfg.Security.TLSPolicy, nil, []byte(cfg.Security.CACert))
+			if err != nil {
+				return nil, err
+			}
+
+			trainerDialOptions = append(trainerDialOptions, grpc.WithTransportCredentials(clientTransportCredentials))
+		} else {
+			trainerDialOptions = append(trainerDialOptions, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		}
+
+		// Initialize trainer client.
+		trainerClient, err := trainerclient.GetV1ByAddr(ctx, cfg.Trainer.Addr, trainerDialOptions...)
+		if err != nil {
+			return nil, err
+		}
+		s.trainerClient = trainerClient
+	}
+
+	// Initialize dial options of announcer.
+	announcerOptions := []announcer.Option{}
+	if s.trainerClient != nil {
+		announcerOptions = append(announcerOptions, announcer.WithTrainerClient(s.trainerClient))
+	}
+
+	// Initialize announcer.
+	announcer, err := announcer.New(cfg, s.managerClient, storage, announcerOptions...)
+	if err != nil {
+		return nil, err
+	}
+	s.announcer = announcer
+
+	// Initialize certify client.
+	var (
+		certifyClient              *certify.Certify
+		clientTransportCredentials credentials.TransportCredentials
+	)
+	if cfg.Security.AutoIssueCert {
+		// Initialize security client.
+		securityClient, err := securityclient.GetV1(ctx, cfg.Manager.Addr, managerDialOptions...)
+		if err != nil {
+			return nil, err
+		}
+		s.securityClient = securityClient
+
+		certifyClient = &certify.Certify{
+			CommonName:  types.SchedulerName,
+			Issuer:      issuer.NewDragonflyIssuer(s.securityClient, issuer.WithValidityPeriod(cfg.Security.CertSpec.ValidityPeriod)),
+			RenewBefore: time.Hour,
+			CertConfig: &certify.CertConfig{
+				SubjectAlternativeNames:   cfg.Security.CertSpec.DNSNames,
+				IPSubjectAlternativeNames: append(cfg.Security.CertSpec.IPAddresses, cfg.Server.AdvertiseIP),
+			},
+			IssueTimeout: 0,
+			Logger:       zapadapter.New(logger.CoreLogger.Desugar()),
+			Cache: cache.NewCertifyMutliCache(
+				certify.NewMemCache(),
+				certify.DirCache(filepath.Join(d.CacheDir(), cache.CertifyCacheDirName, types.SchedulerName))),
+		}
+
+		clientTransportCredentials, err = rpc.NewClientCredentialsByCertify(cfg.Security.TLSPolicy, []byte(cfg.Security.CACert), certifyClient)
+		if err != nil {
+			return nil, err
+		}
+
+		// Issue a certificate to reduce first time delay.
+		if _, err := certifyClient.GetCertificate(&tls.ClientHelloInfo{
+			ServerName: cfg.Server.AdvertiseIP.String(),
 		}); err != nil {
 			return nil, err
 		}
 	}
 
-	// Initialize dynconfig client
-	options := []dynconfig.Option{dynconfig.WithLocalConfigPath(dependency.GetConfigPath("scheduler"))}
-	if s.managerClient != nil && cfg.DynConfig.Type == dynconfig.ManagerSourceType {
-		options = append(options,
-			dynconfig.WithManagerClient(config.NewManagerClient(s.managerClient, cfg.Manager.SchedulerClusterID)),
-			dynconfig.WithCachePath(config.DefaultDynconfigCachePath),
-			dynconfig.WithExpireTime(cfg.DynConfig.ExpireTime),
-		)
-	}
-	dynConfig, err := config.NewDynconfig(cfg.DynConfig.Type, cfg.DynConfig.CDNDirPath, options...)
+	// Initialize dynconfig client.
+	dynconfig, err := config.NewDynconfig(s.managerClient, filepath.Join(d.CacheDir(), dynconfig.CacheDirName), cfg, config.WithTransportCredentials(clientTransportCredentials))
 	if err != nil {
 		return nil, err
 	}
-	s.dynConfig = dynConfig
+	s.dynconfig = dynconfig
 
-	// Initialize GC
-	s.gc = gc.New(gc.WithLogger(logger.GcLogger))
+	// Initialize GC.
+	s.gc = gc.New(gc.WithLogger(logger.GCLogger))
 
-	// Initialize scheduler service
-	var openTel bool
-	if cfg.Options.Telemetry.Jaeger != "" {
-		openTel = true
-	}
-	service, err := core.NewSchedulerService(cfg.Scheduler, dynConfig, s.gc, core.WithDisableCDN(cfg.DisableCDN), core.WithOpenTel(openTel))
+	// Initialize resource.
+	resource, err := resource.New(cfg, s.gc, dynconfig, resource.WithTransportCredentials(clientTransportCredentials))
 	if err != nil {
 		return nil, err
 	}
-	s.service = service
+	s.resource = resource
 
-	// Initialize grpc service
-	var opts []grpc.ServerOption
-	if s.config.Options.Telemetry.Jaeger != "" {
-		opts = append(opts, grpc.ChainUnaryInterceptor(otelgrpc.UnaryServerInterceptor()), grpc.ChainStreamInterceptor(otelgrpc.StreamServerInterceptor()))
-	}
-	grpcServer, err := rpcserver.New(s.service, opts...)
-	if err != nil {
-		return nil, err
-	}
-	s.grpcServer = grpcServer
-
-	// Initialize prometheus
-	if cfg.Metrics != nil {
-		s.metricsServer = metrics.New(cfg.Metrics, grpcServer)
-	}
-
-	// Initialize job service
-	if cfg.Job.Redis.Host != "" {
-		s.job, err = job.New(context.Background(), cfg.Job, iputils.HostName, s.service)
+	// Initialize redis client.
+	var rdb redis.UniversalClient
+	if pkgredis.IsEnabled(cfg.Database.Redis.Addrs) {
+		rdb, err = pkgredis.NewRedis(&redis.UniversalOptions{
+			Addrs:      cfg.Database.Redis.Addrs,
+			MasterName: cfg.Database.Redis.MasterName,
+			DB:         cfg.Database.Redis.NetworkTopologyDB,
+			Username:   cfg.Database.Redis.Username,
+			Password:   cfg.Database.Redis.Password,
+		})
 		if err != nil {
 			return nil, err
 		}
 	}
 
+	// Initialize job service.
+	if cfg.Job.Enable && pkgredis.IsEnabled(cfg.Database.Redis.Addrs) {
+		s.job, err = job.New(cfg, resource)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Initialize network topology service.
+	if cfg.NetworkTopology.Enable && pkgredis.IsEnabled(cfg.Database.Redis.Addrs) {
+		s.networkTopology, err = networktopology.NewNetworkTopology(cfg.NetworkTopology, rdb, resource, s.storage)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Initialize scheduling.
+	scheduling := scheduling.New(&cfg.Scheduler, dynconfig, d.PluginDir())
+
+	// Initialize server options of scheduler grpc server.
+	schedulerServerOptions := []grpc.ServerOption{}
+	if certifyClient != nil {
+		serverTransportCredentials, err := rpc.NewServerCredentialsByCertify(cfg.Security.TLSPolicy, cfg.Security.TLSVerify, []byte(cfg.Security.CACert), certifyClient)
+		if err != nil {
+			return nil, err
+		}
+
+		schedulerServerOptions = append(schedulerServerOptions, grpc.Creds(serverTransportCredentials))
+	} else {
+		schedulerServerOptions = append(schedulerServerOptions, grpc.Creds(insecure.NewCredentials()))
+	}
+
+	svr := rpcserver.New(cfg, resource, scheduling, dynconfig, s.storage, s.networkTopology, schedulerServerOptions...)
+	s.grpcServer = svr
+
+	// Initialize metrics.
+	if cfg.Metrics.Enable {
+		s.metricsServer = metrics.New(&cfg.Metrics, s.grpcServer)
+	}
+
 	return s, nil
 }
 
+// Serve starts the scheduler server.
 func (s *Server) Serve() error {
-	// Serve dynConfig
+	// Serve dynconfig.
 	go func() {
-		if err := s.dynConfig.Serve(); err != nil {
-			logger.Fatalf("dynconfig start failed %v", err)
+		if err := s.dynconfig.Serve(); err != nil {
+			logger.Fatalf("dynconfig start failed %s", err.Error())
 		}
+
 		logger.Info("dynconfig start successfully")
 	}()
 
-	// Serve GC
-	s.gc.Serve()
+	// Serve GC.
+	s.gc.Start()
 	logger.Info("gc start successfully")
 
-	// Serve service
-	go func() {
-		s.service.Serve()
-		logger.Info("scheduler service start successfully")
-	}()
-
-	// Serve Job
+	// Serve Job.
 	if s.job != nil {
-		go func() {
-			if err := s.job.Serve(); err != nil {
-				logger.Fatalf("job start failed %v", err)
-			}
-			logger.Info("job start successfully")
-		}()
+		s.job.Serve()
+		logger.Info("job start successfully")
 	}
 
-	// Started metrics server
+	// Started metrics server.
 	if s.metricsServer != nil {
 		go func() {
 			logger.Infof("started metrics server at %s", s.metricsServer.Addr)
@@ -186,70 +321,129 @@ func (s *Server) Serve() error {
 				if err == http.ErrServerClosed {
 					return
 				}
-				logger.Fatalf("metrics server closed unexpect: %+v", err)
+
+				logger.Fatalf("metrics server closed unexpect: %s", err.Error())
 			}
 		}()
 	}
 
-	// Serve Keepalive
-	if s.managerClient != nil {
+	// Serve announcer.
+	go func() {
+		s.announcer.Serve()
+		logger.Info("announcer start successfully")
+	}()
+
+	// Serve network topology.
+	if s.networkTopology != nil {
 		go func() {
-			logger.Info("start keepalive to manager")
-			s.managerClient.KeepAlive(s.config.Manager.KeepAlive.Interval, &manager.KeepAliveRequest{
-				HostName:   s.config.Server.Host,
-				SourceType: manager.SourceType_SCHEDULER_SOURCE,
-				ClusterId:  uint64(s.config.Manager.SchedulerClusterID),
-			})
+			s.networkTopology.Serve()
+			logger.Info("network topology start successfully")
 		}()
 	}
 
-	// Generate GRPC listener
-	lis, _, err := rpc.ListenWithPortRange(s.config.Server.IP, s.config.Server.Port, s.config.Server.Port)
-	if err != nil {
-		logger.Fatalf("net listener failed to start: %+v", err)
+	// Generate GRPC limit listener.
+	ip, ok := ip.FormatIP(s.config.Server.ListenIP.String())
+	if !ok {
+		return errors.New("format ip failed")
 	}
-	defer lis.Close()
 
-	// Started GRPC server
-	logger.Infof("started grpc server at %s://%s", lis.Addr().Network(), lis.Addr().String())
-	if err := s.grpcServer.Serve(lis); err != nil {
-		logger.Errorf("stoped grpc server: %+v", err)
+	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", ip, s.config.Server.Port))
+	if err != nil {
+		logger.Fatalf("net listener failed to start: %s", err.Error())
+	}
+	defer listener.Close()
+
+	// Started GRPC server.
+	logger.Infof("started grpc server at %s://%s", listener.Addr().Network(), listener.Addr().String())
+	if err := s.grpcServer.Serve(listener); err != nil {
+		logger.Errorf("stoped grpc server: %s", err.Error())
 		return err
 	}
 
 	return nil
 }
 
+// Stop stops the scheduler server.
 func (s *Server) Stop() {
-	// Stop dynamic server
-	s.dynConfig.Stop()
-	logger.Info("dynconfig client closed")
-
-	// Stop manager client
-	if s.managerClient != nil {
-		if err := s.managerClient.Close(); err != nil {
-			logger.Errorf("manager client failed to stop: %+v", err)
-		}
-		logger.Info("manager client closed")
+	// Stop dynconfig.
+	if err := s.dynconfig.Stop(); err != nil {
+		logger.Errorf("stop dynconfig failed %s", err.Error())
+	} else {
+		logger.Info("stop dynconfig closed")
 	}
 
-	// Stop GC
+	// Stop resource.
+	if err := s.resource.Stop(); err != nil {
+		logger.Errorf("stop resource failed %s", err.Error())
+	} else {
+		logger.Info("stop resource closed")
+	}
+
+	// Clean download storage.
+	if err := s.storage.ClearDownload(); err != nil {
+		logger.Errorf("clean download storage failed %s", err.Error())
+	} else {
+		logger.Info("clean download storage completed")
+	}
+
+	// Clean network topology storage.
+	if err := s.storage.ClearNetworkTopology(); err != nil {
+		logger.Errorf("clean network topology storage failed %s", err.Error())
+	} else {
+		logger.Info("clean network topology storage completed")
+	}
+
+	// Stop GC.
 	s.gc.Stop()
 	logger.Info("gc closed")
 
-	// Stop scheduler service
-	s.service.Stop()
-	logger.Info("scheduler service closed")
-
-	// Stop metrics server
+	// Stop metrics server.
 	if s.metricsServer != nil {
 		if err := s.metricsServer.Shutdown(context.Background()); err != nil {
-			logger.Errorf("metrics server failed to stop: %+v", err)
+			logger.Errorf("metrics server failed to stop: %s", err.Error())
+		} else {
+			logger.Info("metrics server closed under request")
 		}
-		logger.Info("metrics server closed under request")
 	}
 
-	// Stop GRPC server
+	// Stop announcer.
+	s.announcer.Stop()
+	logger.Info("stop announcer closed")
+
+	// Stop manager client.
+	if s.managerClient != nil {
+		if err := s.managerClient.Close(); err != nil {
+			logger.Errorf("manager client failed to stop: %s", err.Error())
+		} else {
+			logger.Info("manager client closed")
+		}
+	}
+
+	// Stop trainer client.
+	if s.trainerClient != nil {
+		if err := s.trainerClient.Close(); err != nil {
+			logger.Errorf("trainer client failed to stop: %s", err.Error())
+		} else {
+			logger.Info("trainer client closed")
+		}
+	}
+
+	// Stop security client.
+	if s.securityClient != nil {
+		if err := s.securityClient.Close(); err != nil {
+			logger.Errorf("security client failed to stop: %s", err.Error())
+		} else {
+			logger.Info("security client closed")
+		}
+	}
+
+	// Stop network topology.
+	if s.networkTopology != nil {
+		s.networkTopology.Stop()
+		logger.Info("network topology closed")
+	}
+
+	// Stop GRPC server.
 	stopped := make(chan struct{})
 	go func() {
 		s.grpcServer.GracefulStop()

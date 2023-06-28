@@ -17,12 +17,14 @@
 package config
 
 import (
+	"net"
 	"time"
 
+	"d7y.io/dragonfly/v2/pkg/net/ip"
 	"d7y.io/dragonfly/v2/pkg/unit"
 )
 
-/* the reason of backing to source */
+// Reason of backing to source.
 const (
 	BackSourceReasonNone          = 0
 	BackSourceReasonRegisterFail  = 1
@@ -38,29 +40,20 @@ const (
 	ForceNotBackSourceAddition    = 1000
 )
 
-/* download pattern */
+// Download limit.
 const (
-	PatternP2P    = "p2p"
-	PatternCDN    = "cdn"
-	PatternSource = "source"
+	DefaultPerPeerDownloadLimit = 512 * unit.MB
+	DefaultTotalDownloadLimit   = 1024 * unit.MB
+	DefaultUploadLimit          = 1024 * unit.MB
+	DefaultMinRate              = 20 * unit.MB
 )
 
-const (
-	DefaultPerPeerDownloadLimit = 20 * unit.MB
-	DefaultTotalDownloadLimit   = 100 * unit.MB
-	DefaultUploadLimit          = 100 * unit.MB
-	DefaultMinRate              = 64 * unit.KB
-)
-
-/* others */
+// Others.
 const (
 	DefaultTimestampFormat = "2006-01-02 15:04:05"
 	SchemaHTTP             = "http"
 
-	ServerPortLowerLimit = 15000
-	ServerPortUpperLimit = 65000
-
-	DefaultTaskExpireTime  = 3 * time.Minute
+	DefaultTaskExpireTime  = 6 * time.Hour
 	DefaultGCInterval      = 1 * time.Minute
 	DefaultDaemonAliveTime = 5 * time.Minute
 	DefaultScheduleTimeout = 5 * time.Minute
@@ -70,10 +63,56 @@ const (
 	DefaultSchedulerIP     = "127.0.0.1"
 	DefaultSchedulerPort   = 8002
 
-	DefaultPieceChanSize = 16
+	DefaultPieceChanSize              = 16
+	DefaultPieceQueueExponent         = 10
+	DefaultPieceDispatcherRandomRatio = 0.1
+	DefaultObjectMaxReplicas          = 3
 )
 
+// Store strategy.
 const (
 	SimpleLocalTaskStoreStrategy  = StoreStrategy("io.d7y.storage.v2.simple")
 	AdvanceLocalTaskStoreStrategy = StoreStrategy("io.d7y.storage.v2.advance")
+)
+
+// Dfcache subcommand names.
+const (
+	CmdStat   = "stat"
+	CmdImport = "import"
+	CmdExport = "export"
+	CmdDelete = "delete"
+)
+
+// Service defalut port of listening.
+const (
+	DefaultEndPort                = 65535
+	DefaultPeerStartPort          = 65000
+	DefaultUploadStartPort        = 65002
+	DefaultObjectStorageStartPort = 65004
+	DefaultHealthyStartPort       = 40901
+)
+
+var (
+	// DefaultCertIPAddresses is default ip addresses of certificate.
+	DefaultCertIPAddresses = []net.IP{ip.IPv4, ip.IPv6}
+
+	// DefaultCertDNSNames is default dns names of certificate.
+	DefaultCertDNSNames = []string{"dragonfly-peer", "dragonfly-peer.dragonfly-system.svc", "dragonfly-peer.dragonfly-system.svc.cluster.local",
+		"dragonfly-seed-peer", "dragonfly-seed-peer.dragonfly-system.svc", "dragonfly-seed-peer.dragonfly-system.svc.cluster.local",
+		"dragonfly-proxy", "dragonfly-proxy.dragonfly-system.svc", "dragonfly-proxy.dragonfly-system.svc.cluster.local",
+		"dragonfly-dfdaemon", "dragonfly-dfdaemon.dragonfly-system.svc", "dragonfly-dfdaemon.dragonfly-system.svc.cluster.local",
+	}
+
+	// DefaultCertValidityPeriod is default validity period of certificate.
+	DefaultCertValidityPeriod = 180 * 24 * time.Hour
+)
+
+var (
+	// DefaultAnnouncerSchedulerInterval is default interface of announcing scheduler.
+	DefaultAnnouncerSchedulerInterval = 30 * time.Second
+)
+
+const (
+	// DefaultProbeInterval is the default interval of probing host.
+	DefaultProbeInterval = 20 * time.Minute
 )

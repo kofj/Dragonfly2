@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strings"
 )
 
 const (
@@ -27,9 +28,18 @@ const (
 )
 
 func DockerCommand(arg ...string) *exec.Cmd {
-	extArgs := []string{"exec", "-i", kindDockerContainer}
+	container := kindDockerContainer
+	extArgs := []string{"exec", "-i", container}
 	extArgs = append(extArgs, arg...)
+	fmt.Println(fmt.Sprintf(`docker %s exec: "%s"`, container, strings.Join(arg, `" "`)))
 	return exec.Command("docker", extArgs...)
+}
+
+func DockerCopy(dst, src string) *exec.Cmd {
+	container := kindDockerContainer
+	args := []string{"cp", src, fmt.Sprintf("%s:%s", container, dst)}
+	fmt.Println(fmt.Sprintf(`docker cp %s to %s:%s"`, src, container, dst))
+	return exec.Command("docker", args...)
 }
 
 func CriCtlCommand(arg ...string) *exec.Cmd {
@@ -39,6 +49,7 @@ func CriCtlCommand(arg ...string) *exec.Cmd {
 }
 
 func KubeCtlCommand(arg ...string) *exec.Cmd {
+	fmt.Println(fmt.Sprintf(`kubectl command: "kubectl" "%s"`, strings.Join(arg, `" "`)))
 	return exec.Command("kubectl", arg...)
 }
 
@@ -70,10 +81,11 @@ func (p *PodExec) Command(arg ...string) *exec.Cmd {
 		extArgs = []string{"-n", p.namespace, "exec", "-c", p.container, p.name, "--"}
 	}
 	extArgs = append(extArgs, arg...)
+	fmt.Println(fmt.Sprintf(`pod %s/%s exec: "%s"`, p.namespace, p.name, strings.Join(arg, `" "`)))
 	return KubeCtlCommand(extArgs...)
 }
 
-func (p *PodExec) CurlCommand(method string, header map[string]string, data map[string]interface{}, target string) *exec.Cmd {
+func (p *PodExec) CurlCommand(method string, header map[string]string, data map[string]any, target string) *exec.Cmd {
 	extArgs := []string{"/usr/bin/curl", target, "-s"}
 	if method != "" {
 		extArgs = append(extArgs, "-X", method)
@@ -84,8 +96,8 @@ func (p *PodExec) CurlCommand(method string, header map[string]string, data map[
 		}
 	}
 	if data != nil {
-		jsonData, _ := json.Marshal(data)
-		extArgs = append(extArgs, "-d", string(jsonData))
+		b, _ := json.Marshal(data)
+		extArgs = append(extArgs, "-d", string(b))
 	}
 	return p.Command(extArgs...)
 }

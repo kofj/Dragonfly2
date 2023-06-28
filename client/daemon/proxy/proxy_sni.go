@@ -18,15 +18,13 @@ package proxy
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"sync"
 	"time"
-
-	"github.com/golang/groupcache/lru"
-	"github.com/pkg/errors"
 
 	logger "d7y.io/dragonfly/v2/internal/dflog"
 )
@@ -73,9 +71,6 @@ func (proxy *Proxy) handleTLSConn(clientConn net.Conn, port int) {
 	if !proxy.cert.Leaf.IsCA {
 		sConfig.Certificates = []tls.Certificate{*proxy.cert}
 	} else {
-		if proxy.certCache == nil { // Initialize proxy.certCache on first access. (Lazy init)
-			proxy.certCache = lru.New(100) // Default max entries size = 100
-		}
 		leafCertSpec := LeafCertSpec{
 			proxy.cert.Leaf.PublicKey,
 			proxy.cert.PrivateKey,
@@ -83,7 +78,10 @@ func (proxy *Proxy) handleTLSConn(clientConn net.Conn, port int) {
 		sConfig.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			// It's assumed that `hello.ServerName` is always same as `host`, in practice.
 			serverName = hello.ServerName
+
+			proxy.cacheRWMutex.RLock()
 			cached, hit := proxy.certCache.Get(serverName)
+			proxy.cacheRWMutex.RUnlock()
 			if hit && time.Now().Before(cached.(*tls.Certificate).Leaf.NotAfter) { // If cache hit and the cert is not expired
 				logger.Debugf("TLS Cache hit, cacheKey = <%s>", serverName)
 				return cached.(*tls.Certificate), nil
@@ -93,7 +91,9 @@ func (proxy *Proxy) handleTLSConn(clientConn net.Conn, port int) {
 			if err == nil {
 				// Put cert in cache only if there is no error. So all certs in cache are always valid.
 				// But certs in cache maybe expired (After 24 hours, see the default duration of generated certs)
+				proxy.cacheRWMutex.Lock()
 				proxy.certCache.Add(serverName, cert)
+				proxy.cacheRWMutex.Unlock()
 			}
 			// If err != nil, means unrecoverable error happened in genLeafCert(...)
 			return cert, err
@@ -108,11 +108,18 @@ func (proxy *Proxy) handleTLSConn(clientConn net.Conn, port int) {
 	defer tlsConn.Close()
 
 	rp := &httputil.ReverseProxy{
-		Director: func(r *http.Request) {
-			r.URL.Scheme = schemaHTTPS
-			r.URL.Host = serverName
+		Director: func(req *http.Request) {
+			req.URL.Scheme = schemaHTTPS
+			req.URL.Host = serverName
 			if port != portHTTPS {
-				r.URL.Host = fmt.Sprintf("%s:%d", serverName, port)
+				req.URL.Host = fmt.Sprintf("%s:%d", serverName, port)
+			}
+			if proxy.dumpHTTPContent {
+				if out, e := httputil.DumpRequest(req, false); e == nil {
+					logger.Debugf("dump request in SNI ReverseProxy: %s", string(out))
+				} else {
+					logger.Errorf("dump request in SNI ReverseProxy error: %s", e)
+				}
 			}
 		},
 		Transport: proxy.newTransport(proxy.remoteConfig(serverName)),
@@ -122,7 +129,8 @@ func (proxy *Proxy) handleTLSConn(clientConn net.Conn, port int) {
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	// NOTE: http.Serve always returns a non-nil error
-	if err := http.Serve(&singleUseListener{&customCloseConn{tlsConn, wg.Done}}, rp); err != errServerClosed && err != http.ErrServerClosed {
+	err = http.Serve(&singleUseListener{&customCloseConn{tlsConn, wg.Done}}, rp)
+	if err != errServerClosed && err != http.ErrServerClosed {
 		logger.Errorf("failed to accept incoming HTTPS connections: %v", err)
 	}
 	wg.Wait()

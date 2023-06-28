@@ -23,6 +23,66 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func Test_Set(t *testing.T) {
+	assert := testifyassert.New(t)
+	testCases := []struct {
+		sizeString string
+		sizeNumber int64
+		failed     bool
+	}{
+		{
+			sizeString: "",
+			sizeNumber: 0,
+		},
+		{
+			sizeString: "1B",
+			sizeNumber: 1,
+		},
+		{
+			sizeString: "2KB",
+			sizeNumber: 2 * 1024,
+		},
+		{
+			sizeString: "3MB",
+			sizeNumber: 3 * 1024 * 1024,
+		},
+		{
+			sizeString: "4GB",
+			sizeNumber: 4 * 1024 * 1024 * 1024,
+		},
+		{
+			sizeString: "5TB",
+			sizeNumber: 5 * 1024 * 1024 * 1024 * 1024,
+		},
+		{
+			sizeString: "6PB",
+			sizeNumber: 6 * 1024 * 1024 * 1024 * 1024 * 1024,
+		},
+		{
+			sizeString: "7EB",
+			sizeNumber: 7 * 1024 * 1024 * 1024 * 1024 * 1024 * 1024,
+		},
+		{
+			sizeString: "8unknown",
+			failed:     true,
+		},
+	}
+
+	for _, tc := range testCases {
+		var b Bytes
+		err := b.Set(tc.sizeString)
+		if tc.failed {
+			assert.NotNil(err)
+		} else {
+			assert.Nil(err)
+		}
+		if err != nil {
+			continue
+		}
+		assert.Equal(tc.sizeNumber, b.ToNumber())
+	}
+}
+
 func Test_parseByte(t *testing.T) {
 	assert := testifyassert.New(t)
 	testCases := []struct {
@@ -32,6 +92,7 @@ func Test_parseByte(t *testing.T) {
 	}{
 		{
 			data: []string{
+				"1234567890123456789012345678901234567890123456789012345678901234567890",
 				"1Ka",
 				"1Kia",
 				"1KBa",
@@ -94,6 +155,12 @@ func Test_parseByte(t *testing.T) {
 				"1Ei",
 			},
 			size: int64(EB),
+		},
+		{
+			data: []string{
+				"",
+			},
+			size: 0,
 		},
 	}
 
@@ -160,5 +227,42 @@ size: 1Mix
 			continue
 		}
 		assert.Equal(tc.size, data.Size.ToNumber())
+	}
+}
+
+func Test_String(t *testing.T) {
+	assert := testifyassert.New(t)
+	testCases := []struct {
+		data string
+		b    Bytes
+	}{
+		{
+			data: "1.0B",
+			b:    1,
+		},
+		{
+			data: "2.0KB",
+			b:    2 * 1024,
+		},
+		{
+			data: "3.0MB",
+			b:    3 * 1024 * 1024,
+		},
+		{
+			data: "4.0GB",
+			b:    4 * 1024 * 1024 * 1024,
+		},
+		{
+			data: "5.0TB",
+			b:    5 * 1024 * 1024 * 1024 * 1024,
+		},
+		{
+			data: "6.0PB",
+			b:    6 * 1024 * 1024 * 1024 * 1024 * 1024,
+		},
+	}
+
+	for _, tc := range testCases {
+		assert.Equal(tc.b.String(), tc.data)
 	}
 }

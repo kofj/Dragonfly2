@@ -14,112 +14,140 @@
  * limitations under the License.
  */
 
+//go:generate mockgen -destination mocks/service_mock.go -source service.go -package mocks
+
 package service
 
 import (
-	"d7y.io/dragonfly/v2/manager/cache"
-	"d7y.io/dragonfly/v2/manager/database"
-	"d7y.io/dragonfly/v2/manager/job"
-	"d7y.io/dragonfly/v2/manager/model"
-	"d7y.io/dragonfly/v2/manager/permission/rbac"
-	"d7y.io/dragonfly/v2/manager/types"
+	"context"
+
 	"github.com/casbin/casbin/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
-
 	"gorm.io/gorm"
+
+	"d7y.io/dragonfly/v2/manager/cache"
+	"d7y.io/dragonfly/v2/manager/database"
+	"d7y.io/dragonfly/v2/manager/job"
+	"d7y.io/dragonfly/v2/manager/models"
+	"d7y.io/dragonfly/v2/manager/permission/rbac"
+	"d7y.io/dragonfly/v2/manager/types"
+	"d7y.io/dragonfly/v2/pkg/objectstorage"
 )
 
-type REST interface {
-	GetUser(uint) (*model.User, error)
-	SignIn(types.SignInRequest) (*model.User, error)
-	SignUp(types.SignUpRequest) (*model.User, error)
-	OauthSignin(string) (string, error)
-	OauthSigninCallback(string, string) (*model.User, error)
-	ResetPassword(uint, types.ResetPasswordRequest) error
-	GetRolesForUser(uint) ([]string, error)
-	AddRoleForUser(types.AddRoleForUserParams) (bool, error)
-	DeleteRoleForUser(types.DeleteRoleForUserParams) (bool, error)
+type Service interface {
+	UpdateUser(context.Context, uint, types.UpdateUserRequest) (*models.User, error)
+	GetUser(context.Context, uint) (*models.User, error)
+	GetUsers(context.Context, types.GetUsersQuery) ([]models.User, int64, error)
+	SignIn(context.Context, types.SignInRequest) (*models.User, error)
+	SignUp(context.Context, types.SignUpRequest) (*models.User, error)
+	OauthSignin(context.Context, string) (string, error)
+	OauthSigninCallback(context.Context, string, string) (*models.User, error)
+	ResetPassword(context.Context, uint, types.ResetPasswordRequest) error
+	GetRolesForUser(context.Context, uint) ([]string, error)
+	AddRoleForUser(context.Context, types.AddRoleForUserParams) (bool, error)
+	DeleteRoleForUser(context.Context, types.DeleteRoleForUserParams) (bool, error)
 
-	CreateRole(json types.CreateRoleRequest) error
-	DestroyRole(string) (bool, error)
-	GetRole(string) [][]string
-	GetRoles() []string
-	AddPermissionForRole(string, types.AddPermissionForRoleRequest) (bool, error)
-	DeletePermissionForRole(string, types.DeletePermissionForRoleRequest) (bool, error)
+	CreateRole(context.Context, types.CreateRoleRequest) error
+	DestroyRole(context.Context, string) (bool, error)
+	GetRole(context.Context, string) [][]string
+	GetRoles(context.Context) []string
+	AddPermissionForRole(context.Context, string, types.AddPermissionForRoleRequest) (bool, error)
+	DeletePermissionForRole(context.Context, string, types.DeletePermissionForRoleRequest) (bool, error)
 
-	GetPermissions(*gin.Engine) []rbac.Permission
+	GetPermissions(context.Context, *gin.Engine) []rbac.Permission
 
-	CreateOauth(types.CreateOauthRequest) (*model.Oauth, error)
-	DestroyOauth(uint) error
-	UpdateOauth(uint, types.UpdateOauthRequest) (*model.Oauth, error)
-	GetOauth(uint) (*model.Oauth, error)
-	GetOauths(types.GetOauthsQuery) (*[]model.Oauth, error)
-	OauthTotalCount(types.GetOauthsQuery) (int64, error)
+	CreateOauth(context.Context, types.CreateOauthRequest) (*models.Oauth, error)
+	DestroyOauth(context.Context, uint) error
+	UpdateOauth(context.Context, uint, types.UpdateOauthRequest) (*models.Oauth, error)
+	GetOauth(context.Context, uint) (*models.Oauth, error)
+	GetOauths(context.Context, types.GetOauthsQuery) ([]models.Oauth, int64, error)
 
-	CreateCDNCluster(types.CreateCDNClusterRequest) (*model.CDNCluster, error)
-	CreateCDNClusterWithSecurityGroupDomain(types.CreateCDNClusterRequest) (*model.CDNCluster, error)
-	DestroyCDNCluster(uint) error
-	UpdateCDNCluster(uint, types.UpdateCDNClusterRequest) (*model.CDNCluster, error)
-	UpdateCDNClusterWithSecurityGroupDomain(uint, types.UpdateCDNClusterRequest) (*model.CDNCluster, error)
-	GetCDNCluster(uint) (*model.CDNCluster, error)
-	GetCDNClusters(types.GetCDNClustersQuery) (*[]model.CDNCluster, error)
-	CDNClusterTotalCount(types.GetCDNClustersQuery) (int64, error)
-	AddCDNToCDNCluster(uint, uint) error
-	AddSchedulerClusterToCDNCluster(uint, uint) error
+	CreateCluster(context.Context, types.CreateClusterRequest) (*types.CreateClusterResponse, error)
+	DestroyCluster(context.Context, uint) error
+	UpdateCluster(context.Context, uint, types.UpdateClusterRequest) (*types.UpdateClusterResponse, error)
+	GetCluster(context.Context, uint) (*types.GetClusterResponse, error)
+	GetClusters(context.Context, types.GetClustersQuery) ([]types.GetClusterResponse, int64, error)
 
-	CreateCDN(types.CreateCDNRequest) (*model.CDN, error)
-	DestroyCDN(uint) error
-	UpdateCDN(uint, types.UpdateCDNRequest) (*model.CDN, error)
-	GetCDN(uint) (*model.CDN, error)
-	GetCDNs(types.GetCDNsQuery) (*[]model.CDN, error)
-	CDNTotalCount(types.GetCDNsQuery) (int64, error)
+	CreateSeedPeerCluster(context.Context, types.CreateSeedPeerClusterRequest) (*models.SeedPeerCluster, error)
+	DestroySeedPeerCluster(context.Context, uint) error
+	UpdateSeedPeerCluster(context.Context, uint, types.UpdateSeedPeerClusterRequest) (*models.SeedPeerCluster, error)
+	GetSeedPeerCluster(context.Context, uint) (*models.SeedPeerCluster, error)
+	GetSeedPeerClusters(context.Context, types.GetSeedPeerClustersQuery) ([]models.SeedPeerCluster, int64, error)
+	AddSeedPeerToSeedPeerCluster(context.Context, uint, uint) error
+	AddSchedulerClusterToSeedPeerCluster(context.Context, uint, uint) error
 
-	CreateSchedulerCluster(types.CreateSchedulerClusterRequest) (*model.SchedulerCluster, error)
-	CreateSchedulerClusterWithSecurityGroupDomain(types.CreateSchedulerClusterRequest) (*model.SchedulerCluster, error)
-	DestroySchedulerCluster(uint) error
-	UpdateSchedulerCluster(uint, types.UpdateSchedulerClusterRequest) (*model.SchedulerCluster, error)
-	UpdateSchedulerClusterWithSecurityGroupDomain(uint, types.UpdateSchedulerClusterRequest) (*model.SchedulerCluster, error)
-	GetSchedulerCluster(uint) (*model.SchedulerCluster, error)
-	GetSchedulerClusters(types.GetSchedulerClustersQuery) (*[]model.SchedulerCluster, error)
-	SchedulerClusterTotalCount(types.GetSchedulerClustersQuery) (int64, error)
-	AddSchedulerToSchedulerCluster(uint, uint) error
+	CreateSeedPeer(context.Context, types.CreateSeedPeerRequest) (*models.SeedPeer, error)
+	DestroySeedPeer(context.Context, uint) error
+	UpdateSeedPeer(context.Context, uint, types.UpdateSeedPeerRequest) (*models.SeedPeer, error)
+	GetSeedPeer(context.Context, uint) (*models.SeedPeer, error)
+	GetSeedPeers(context.Context, types.GetSeedPeersQuery) ([]models.SeedPeer, int64, error)
 
-	CreateScheduler(types.CreateSchedulerRequest) (*model.Scheduler, error)
-	DestroyScheduler(uint) error
-	UpdateScheduler(uint, types.UpdateSchedulerRequest) (*model.Scheduler, error)
-	GetScheduler(uint) (*model.Scheduler, error)
-	GetSchedulers(types.GetSchedulersQuery) (*[]model.Scheduler, error)
-	SchedulerTotalCount(types.GetSchedulersQuery) (int64, error)
+	GetPeers(context.Context) ([]string, error)
 
-	CreateSecurityGroup(types.CreateSecurityGroupRequest) (*model.SecurityGroup, error)
-	DestroySecurityGroup(uint) error
-	UpdateSecurityGroup(uint, types.UpdateSecurityGroupRequest) (*model.SecurityGroup, error)
-	GetSecurityGroup(uint) (*model.SecurityGroup, error)
-	GetSecurityGroups(types.GetSecurityGroupsQuery) (*[]model.SecurityGroup, error)
-	SecurityGroupTotalCount(types.GetSecurityGroupsQuery) (int64, error)
-	AddSchedulerClusterToSecurityGroup(uint, uint) error
-	AddCDNClusterToSecurityGroup(uint, uint) error
+	CreateSchedulerCluster(context.Context, types.CreateSchedulerClusterRequest) (*models.SchedulerCluster, error)
+	DestroySchedulerCluster(context.Context, uint) error
+	UpdateSchedulerCluster(context.Context, uint, types.UpdateSchedulerClusterRequest) (*models.SchedulerCluster, error)
+	GetSchedulerCluster(context.Context, uint) (*models.SchedulerCluster, error)
+	GetSchedulerClusters(context.Context, types.GetSchedulerClustersQuery) ([]models.SchedulerCluster, int64, error)
+	AddSchedulerToSchedulerCluster(context.Context, uint, uint) error
 
-	CreatePreheat(types.CreatePreheatRequest) (*types.Preheat, error)
-	GetPreheat(string) (*types.Preheat, error)
+	CreateScheduler(context.Context, types.CreateSchedulerRequest) (*models.Scheduler, error)
+	DestroyScheduler(context.Context, uint) error
+	UpdateScheduler(context.Context, uint, types.UpdateSchedulerRequest) (*models.Scheduler, error)
+	GetScheduler(context.Context, uint) (*models.Scheduler, error)
+	GetSchedulers(context.Context, types.GetSchedulersQuery) ([]models.Scheduler, int64, error)
+
+	CreateBucket(context.Context, types.CreateBucketRequest) error
+	DestroyBucket(context.Context, string) error
+	GetBucket(context.Context, string) (*objectstorage.BucketMetadata, error)
+	GetBuckets(context.Context) ([]*objectstorage.BucketMetadata, error)
+
+	CreateConfig(context.Context, types.CreateConfigRequest) (*models.Config, error)
+	DestroyConfig(context.Context, uint) error
+	UpdateConfig(context.Context, uint, types.UpdateConfigRequest) (*models.Config, error)
+	GetConfig(context.Context, uint) (*models.Config, error)
+	GetConfigs(context.Context, types.GetConfigsQuery) ([]models.Config, int64, error)
+
+	CreatePreheatJob(context.Context, types.CreatePreheatJobRequest) (*models.Job, error)
+	DestroyJob(context.Context, uint) error
+	UpdateJob(context.Context, uint, types.UpdateJobRequest) (*models.Job, error)
+	GetJob(context.Context, uint) (*models.Job, error)
+	GetJobs(context.Context, types.GetJobsQuery) ([]models.Job, int64, error)
+
+	CreateV1Preheat(context.Context, types.CreateV1PreheatRequest) (*types.CreateV1PreheatResponse, error)
+	GetV1Preheat(context.Context, string) (*types.GetV1PreheatResponse, error)
+
+	CreateApplication(context.Context, types.CreateApplicationRequest) (*models.Application, error)
+	DestroyApplication(context.Context, uint) error
+	UpdateApplication(context.Context, uint, types.UpdateApplicationRequest) (*models.Application, error)
+	GetApplication(context.Context, uint) (*models.Application, error)
+	GetApplications(context.Context, types.GetApplicationsQuery) ([]models.Application, int64, error)
+
+	CreateModel(context.Context, types.CreateModelRequest) (*models.Model, error)
+	DestroyModel(context.Context, uint) error
+	UpdateModel(context.Context, uint, types.UpdateModelRequest) (*models.Model, error)
+	GetModel(context.Context, uint) (*models.Model, error)
+	GetModels(context.Context, types.GetModelsQuery) ([]models.Model, int64, error)
 }
 
-type rest struct {
-	db       *gorm.DB
-	rdb      *redis.Client
-	cache    *cache.Cache
-	job      job.Job
-	enforcer *casbin.Enforcer
+type service struct {
+	db            *gorm.DB
+	rdb           redis.UniversalClient
+	cache         *cache.Cache
+	job           *job.Job
+	enforcer      *casbin.Enforcer
+	objectStorage objectstorage.ObjectStorage
 }
 
 // NewREST returns a new REST instence
-func NewREST(database *database.Database, cache *cache.Cache, job job.Job, enforcer *casbin.Enforcer) REST {
-	return &rest{
-		db:       database.DB,
-		rdb:      database.RDB,
-		cache:    cache,
-		job:      job,
-		enforcer: enforcer,
+func New(database *database.Database, cache *cache.Cache, job *job.Job, enforcer *casbin.Enforcer, objectStorage objectstorage.ObjectStorage) Service {
+	return &service{
+		db:            database.DB,
+		rdb:           database.RDB,
+		cache:         cache,
+		job:           job,
+		enforcer:      enforcer,
+		objectStorage: objectStorage,
 	}
 }

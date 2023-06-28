@@ -17,17 +17,16 @@
 package storage
 
 import (
+	"errors"
 	"os"
-
-	"github.com/pkg/errors"
 )
 
 const (
 	taskData     = "data"
-	taskMetaData = "metadata"
+	taskMetadata = "metadata"
 
 	defaultFileMode      = os.FileMode(0644)
-	defaultDirectoryMode = os.FileMode(0755)
+	defaultDirectoryMode = os.FileMode(0755) // used unless overridden in config
 )
 
 var (
